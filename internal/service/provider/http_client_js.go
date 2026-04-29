@@ -4,10 +4,10 @@ package provider
 
 import (
 	"net/http"
+
+	"github.com/syumai/workers/cloudflare/fetch"
 )
 
 func newHTTPClient(cfg HTTPConfig) *http.Client {
-	// js/wasm (e.g. Cloudflare Workers) uses the browser fetch API;
-	// http.Transport fields are not available.
-	return http.DefaultClient
+	return fetch.NewClient().HTTPClient(fetch.RedirectModeFollow)
 }
