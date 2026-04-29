@@ -473,7 +473,12 @@
 
 async run(instance, context) {
 			const globalProxy = new Proxy(global, {
-				get(target, prop) { return Reflect.get(...arguments); }
+				get(target, prop) {
+					if (prop === 'context') {
+						return context;
+					}
+					return Reflect.get(...arguments);
+				}
 			})
 			this._inst = instance;
 			this._values = [ // JS values that Go currently has references to, indexed by reference id
@@ -482,7 +487,7 @@ async run(instance, context) {
 				null,
 				true,
 				false,
-				global,
+				globalProxy,
 				this,
 			];
 			this._goRefCounts = []; // number of references that Go has to a JS value, indexed by reference id
