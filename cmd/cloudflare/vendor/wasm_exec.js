@@ -24,6 +24,8 @@
 		throw new Error("cannot export Go (neither global, window nor self is defined)");
 	}
 
+	globalThis.__realGlobal = global;
+
 /* 	if (!global.require && typeof require !== "undefined") {
 		global.require = require;
 	} */
