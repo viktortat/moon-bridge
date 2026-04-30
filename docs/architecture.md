@@ -255,7 +255,7 @@ Moon Bridge 支持多提供商和多模型路由。配置通过 `provider.provid
 - `convertTools()` 根据 per-request `RequestOptions.WebSearchMode` 而非全局 config 决定 web search 行为。
 - `ToAnthropic()` 在基础工具转换后会调用启用插件的 `ToolInjector`，用于把插件提供的 Anthropic 工具追加到本轮请求。
 - **`FromAnthropicWithPlanAndContext()`**：将 Anthropic MessageResponse 转为 OpenAI Response。处理 tool_use → function_call / local_shell_call / custom_tool_call 映射，namespace function 回拆，web_search_call 过滤，usage 归一化。
-- **`ConvertStreamEventsWithContext()`**：逐事件将 Anthropic SSE 流转为 OpenAI 流。管理 content_block 级别的 state 跟踪，处理 text / tool_use / server_tool_use 三种 block 类型的流式拼接。
+- **`ConvertStreamEventsWithContext()`**：逐事件将 Anthropic SSE 流转为 OpenAI 流。管理 content_block 级别的 state 跟踪，处理 text / tool_use / server_tool_use 三种 block 类型的流式拼接。流式 usage 会兼容不同 Anthropic-compatible Provider 的事件布局：若 `message_start` 已携带 cache 字段则保留；若 `message_delta` 才补充 `cache_read_input_tokens` / `cache_creation_input_tokens`，则合并进最终 OpenAI `usage.input_tokens_details.cached_tokens`。
 - **`ConversionContext`**：缓存本轮请求的 custom tool 集合、grammar kind 和 namespace function 映射，确保 custom grammar 工具不被当成普通 function_call 处理，并能在响应侧拼回 raw custom input / 拆回 Codex namespace。
 - **`convertInput()`**：历史消息转换的关键逻辑：连续 `function_call` / `local_shell_call` 归并为同一个 assistant `tool_use` 消息，连续工具输出归并为随后的 user `tool_result` 消息。
 - **`ErrorResponse()`**：统一错误映射，区分请求校验错误和 Provider 错误。
@@ -445,6 +445,8 @@ flowchart LR
 ```
 
 其中 `{UpstreamModel}` 是实际转发到上游的模型名，`Billing` 是 session 累计费用。每请求 `Input` 展示采用 OpenAI 语义：`input_tokens + cache_read_input_tokens`，不把 `cache_creation_input_tokens` 额外计入展示值；cache creation 仍按 `cache_write_price` 计费，并保留在详细汇总里。
+
+流式 Anthropic usage 的 cache 字段可能出现在 `message_start` 或后续 `message_delta`。Moon Bridge 会合并两处事件中的 `input_tokens`、`cache_read_input_tokens`、`cache_creation_input_tokens` 和 `output_tokens` 后再记录统计与输出 Responses usage，因此 Kimi for Coding 这类后置 cache usage 的 Provider 也能正确显示缓存命中率。
 
 服务器关闭时输出完整会话费用汇总，包含按模型分组的费用明细和缓存命中率：
 

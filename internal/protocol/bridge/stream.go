@@ -88,8 +88,7 @@ func (converter *streamConverter) convert(event anthropic.StreamEvent) []openai.
 		if event.Usage != nil {
 			updated := normalizeUsage(*event.Usage)
 			if converter.response.Usage.InputTokens > 0 {
-				updated.InputTokens = converter.response.Usage.InputTokens
-				updated.InputTokensDetails = converter.response.Usage.InputTokensDetails
+				updated = mergeStreamUsage(converter.response.Usage, updated)
 			}
 			updated.TotalTokens = updated.InputTokens + updated.OutputTokens
 			converter.response.Usage = updated
@@ -110,6 +109,18 @@ func (converter *streamConverter) convert(event anthropic.StreamEvent) []openai.
 		return []openai.StreamEvent{converter.lifecycle("response.failed")}
 	}
 	return nil
+}
+
+func mergeStreamUsage(current openai.Usage, updated openai.Usage) openai.Usage {
+	if updated.InputTokens == 0 {
+		updated.InputTokens = current.InputTokens
+	} else if current.InputTokens > updated.InputTokens && current.InputTokensDetails.CachedTokens == 0 && updated.InputTokensDetails.CachedTokens > 0 {
+		updated.InputTokens = current.InputTokens
+	}
+	if updated.InputTokensDetails.CachedTokens == 0 {
+		updated.InputTokensDetails = current.InputTokensDetails
+	}
+	return updated
 }
 
 func (converter *streamConverter) outputAt(index int) openai.OutputItem {

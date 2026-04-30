@@ -55,6 +55,68 @@ func TestConvertStreamEventsConvertsTextLifecycle(t *testing.T) {
 	}
 }
 
+func TestConvertStreamEventsPreservesCacheUsageFromMessageStart(t *testing.T) {
+	events := []anthropic.StreamEvent{
+		{Type: "message_start", Message: &anthropic.MessageResponse{
+			ID:   "msg_1",
+			Type: "message",
+			Role: "assistant",
+			Usage: anthropic.Usage{
+				InputTokens:              100,
+				CacheReadInputTokens:     900,
+				CacheCreationInputTokens: 50,
+			},
+		}},
+		{Type: "content_block_start", Index: 0, ContentBlock: &anthropic.ContentBlock{Type: "text"}},
+		{Type: "content_block_delta", Index: 0, Delta: anthropic.StreamDelta{Type: "text_delta", Text: "Hi"}},
+		{Type: "content_block_stop", Index: 0},
+		{Type: "message_delta", Delta: anthropic.StreamDelta{StopReason: "end_turn"}, Usage: &anthropic.Usage{OutputTokens: 7}},
+		{Type: "message_stop"},
+	}
+
+	completed := streamLifecycleResponse(t, testBridge().ConvertStreamEvents(events, "gpt-test"), "response.completed")
+	if completed.Usage.InputTokens != 1050 {
+		t.Fatalf("InputTokens = %d", completed.Usage.InputTokens)
+	}
+	if completed.Usage.InputTokensDetails.CachedTokens != 900 {
+		t.Fatalf("CachedTokens = %d", completed.Usage.InputTokensDetails.CachedTokens)
+	}
+	if completed.Usage.OutputTokens != 7 || completed.Usage.TotalTokens != 1057 {
+		t.Fatalf("Usage = %+v", completed.Usage)
+	}
+}
+
+func TestConvertStreamEventsMergesCacheUsageFromMessageDelta(t *testing.T) {
+	events := []anthropic.StreamEvent{
+		{Type: "message_start", Message: &anthropic.MessageResponse{
+			ID:    "msg_1",
+			Type:  "message",
+			Role:  "assistant",
+			Usage: anthropic.Usage{InputTokens: 85822},
+		}},
+		{Type: "content_block_start", Index: 0, ContentBlock: &anthropic.ContentBlock{Type: "text"}},
+		{Type: "content_block_delta", Index: 0, Delta: anthropic.StreamDelta{Type: "text_delta", Text: "Hi"}},
+		{Type: "content_block_stop", Index: 0},
+		{Type: "message_delta", Delta: anthropic.StreamDelta{StopReason: "end_turn"}, Usage: &anthropic.Usage{
+			InputTokens:          574,
+			CacheReadInputTokens: 85248,
+			OutputTokens:         145,
+		}},
+		{Type: "message_stop"},
+	}
+
+	completed := streamLifecycleResponse(t, testBridge().ConvertStreamEvents(events, "gpt-test"), "response.completed")
+	if completed.Usage.InputTokens != 85822 {
+		t.Fatalf("InputTokens = %d", completed.Usage.InputTokens)
+	}
+	if completed.Usage.InputTokensDetails.CachedTokens != 85248 {
+		t.Fatalf("CachedTokens = %d", completed.Usage.InputTokensDetails.CachedTokens)
+	}
+	if completed.Usage.OutputTokens != 145 || completed.Usage.TotalTokens != 85967 {
+		t.Fatalf("Usage = %+v", completed.Usage)
+	}
+}
+
 func TestConvertStreamEventsConvertsToolArguments(t *testing.T) {
 	rawInput := json.RawMessage(`{}`)
 	events := []anthropic.StreamEvent{

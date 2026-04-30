@@ -183,7 +183,7 @@ provider:
             cache_read_price: 0.2  # 缓存读取
 ```
 
-费用计算方式：`(input_tokens × input_price + cache_creation × cache_write_price + cache_read × cache_read_price + output_tokens × output_price) / 1_000_000`，四项均为独立计费。如果价格配置不全（某项为 0 或未设置），该项不产生费用。每请求 INFO 行中的 `Input` 展示采用 OpenAI 语义：`input_tokens + cache_read_input_tokens`，不把 `cache_creation_input_tokens` 额外计入展示值；cache creation 仍按 `cache_write_price` 计费，并会出现在详细汇总里。
+费用计算方式：`(input_tokens × input_price + cache_creation × cache_write_price + cache_read × cache_read_price + output_tokens × output_price) / 1_000_000`，四项均为独立计费。如果价格配置不全（某项为 0 或未设置），该项不产生费用。每请求 INFO 行中的 `Input` 展示采用 OpenAI 语义：`input_tokens + cache_read_input_tokens`，不把 `cache_creation_input_tokens` 额外计入展示值；cache creation 仍按 `cache_write_price` 计费，并会出现在详细汇总里。流式 Anthropic-compatible Provider 的 usage 事件位置可能不同：有的在 `message_start` 携带缓存字段，有的在 `message_delta` 才补充 `cache_read_input_tokens` / `cache_creation_input_tokens`。Moon Bridge 会合并两处 usage，再输出 OpenAI Responses 的 `usage.input_tokens_details.cached_tokens` 和会话缓存命中率。
 
 ### Prompt 缓存
 
@@ -539,6 +539,8 @@ cache:
 - **explicit**：由 Moon Bridge 在 system、tools、user messages 等稳定段落的末尾注入 `cache_control` 标记
 - **hybrid**：同时使用两种策略
 - **off**：完全禁用缓存
+
+流式响应的缓存统计会兼容不同 Provider 的事件布局：`message_start` 和 `message_delta` 中出现的 `input_tokens`、`cache_read_input_tokens`、`cache_creation_input_tokens` 会被合并后转换为 OpenAI Responses usage，避免 Kimi for Coding 这类在 `message_delta` 才返回 cache read 的上游被误显示为 0% 缓存命中。
 
 ### DeepSeek V4 专有配置
 
