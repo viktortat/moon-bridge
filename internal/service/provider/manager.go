@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"sync"
 	"sort"
 	"time"
 
@@ -80,6 +81,7 @@ func (r *ResolvedRoute) Preferred() (ProviderCandidate, bool) {
 // ProviderManager manages multiple upstream provider clients and routes
 // model aliases to the appropriate provider.
 type ProviderManager struct {
+	mu        sync.Mutex               // guards field replacement during Reload
 	clients    map[string]*anthropic.Client // provider key -> anthropic.Client
 	providers  map[string]ProviderConfig    // provider key -> config (for inspection)
 	routes     map[string]ModelRoute        // model alias -> route
@@ -144,6 +146,61 @@ func NewProviderManager(providerCfgs map[string]ProviderConfig, routes map[strin
 		}
 	}
 	return pm, nil
+}
+
+// Reload atomically replaces the internal state by building a new
+// ProviderManager from the given config. If building fails, the
+// existing state is preserved and an error is returned.
+func (pm *ProviderManager) Reload(cfg config.Config) error {
+	// Convert config.ProviderDefs to provider.ProviderConfig map.
+	providerDefs := make(map[string]ProviderConfig, len(cfg.ProviderDefs))
+	for key, def := range cfg.ProviderDefs {
+		modelNames := make([]string, 0, len(def.Models))
+		for name := range def.Models {
+			modelNames = append(modelNames, name)
+		}
+		models := make(map[string]ModelMeta, len(def.Models))
+		for name, meta := range def.Models {
+			models[name] = ModelMeta(meta)
+		}
+		providerDefs[key] = ProviderConfig{
+			BaseURL:          def.BaseURL,
+			APIKey:           def.APIKey,
+			Version:          def.Version,
+			UserAgent:        def.UserAgent,
+			Protocol:         def.Protocol,
+			WebSearchSupport: string(def.WebSearchSupport),
+			ModelNames:       modelNames,
+			Models:           models,
+			Offers:           def.Offers,
+		}
+	}
+
+	// Convert config.RouteEntry to provider.ModelRoute map.
+	modelRoutes := make(map[string]ModelRoute, len(cfg.Routes))
+	for alias, route := range cfg.Routes {
+		modelRoutes[alias] = ModelRoute{
+			Provider: route.Provider,
+			Name:     route.Model,
+		}
+	}
+
+	// Build the new manager (validates + creates clients).
+	newPM, err := NewProviderManager(providerDefs, modelRoutes)
+	if err != nil {
+		return err
+	}
+
+	// Atomically replace fields under lock.
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	pm.clients = newPM.clients
+	pm.providers = newPM.providers
+	pm.routes = newPM.routes
+	pm.defaultK = newPM.defaultK
+	pm.resolvedWS = newPM.resolvedWS
+	pm.modelProviders = newPM.modelProviders
+	return nil
 }
 
 // ClientFor returns the anthropic.Client and upstream model name for a given model alias.

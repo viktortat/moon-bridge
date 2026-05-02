@@ -289,3 +289,205 @@ Moon Bridge 提供以下命令行开关：
 | `-codex-base-url` | 生成 config.toml 时使用的 Base URL |
 | `-codex-home` | 指定 CODEX_HOME，同时写入 models_catalog.json |
 | `-dump-config-schema` | 在配置文件旁生成 JSON Schema 并退出 |
+
+---
+
+## 管理 API (`/api/v1/*`)
+
+管理 API 提供可视化面板和自动化工具所需的 RESTful 端点。所有端点路径前缀为 `/api/v1`（WebUI 自动添加该前缀）。认证方式与主 API 一致（Bearer Token）。
+
+### Provider 管理
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `GET` | `/api/v1/providers` | 列出所有 Provider（支持 `limit`、`offset` 分页） |
+| `GET` | `/api/v1/providers/{key}` | 获取单个 Provider 详情（API Key 脱敏显示） |
+| `PUT` | `/api/v1/providers/{key}` | 创建/替换 Provider（暂存为变更，需 apply 生效） |
+| `PATCH` | `/api/v1/providers/{key}` | 部分更新 Provider（API Key 传 `******` 表示保留原值） |
+| `DELETE` | `/api/v1/providers/{key}` | 删除 Provider（暂存为变更） |
+| `POST` | `/api/v1/providers/{key}/test` | 测试 Provider 连接 |
+
+#### PUT /api/v1/providers/{key}
+
+```json
+{
+  "base_url": "https://api.example.com",
+  "api_key": "sk-...",
+  "version": "2024-01-01",
+  "protocol": "anthropic",
+  "user_agent": ""
+}
+```
+
+响应（暂存成功）：
+
+```json
+{
+  "change_id": 42,
+  "status": "pending",
+  "message": "变更已暂存，请调用 POST /changes/apply 使其生效"
+}
+```
+
+#### PATCH /api/v1/providers/{key}
+
+对于已有 Provider，API Key 传 `"******"` 可保留原值（WebUI 脱敏显示时使用此约定）：
+
+```json
+{
+  "base_url": "https://new-endpoint.example.com",
+  "api_key": "******"
+}
+```
+
+#### POST /api/v1/providers/{key}/test
+
+```json
+{
+  "provider": "anthropic",
+  "base_url": "https://api.anthropic.com",
+  "success": true,
+  "duration": "145ms",
+  "timestamp": "2026-05-01T12:00:00Z"
+}
+```
+
+### Offer 管理
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `POST` | `/api/v1/providers/{key}/offers` | 新增 Offer |
+| `PATCH` | `/api/v1/providers/{key}/offers/{model}` | 更新 Offer |
+| `DELETE` | `/api/v1/providers/{key}/offers/{model}` | 删除 Offer |
+
+### Model 管理
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `GET` | `/api/v1/models` | 列出所有 Model |
+| `GET` | `/api/v1/models/{slug}` | 获取单个 Model 详情 |
+| `PUT` | `/api/v1/models/{slug}` | 创建/更新 Model |
+| `DELETE` | `/api/v1/models/{slug}` | 删除 Model（被 Provider Offer 引用时返回 409） |
+
+### Route 管理
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `GET` | `/api/v1/routes` | 列出所有 Route |
+| `GET` | `/api/v1/routes/{alias}` | 获取单个 Route 详情 |
+| `PUT` | `/api/v1/routes/{alias}` | 创建/更新 Route |
+| `DELETE` | `/api/v1/routes/{alias}` | 删除 Route |
+
+### 配置管理
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `GET` | `/api/v1/config/effective` | 获取当前生效配置（FileConfig 格式） |
+| `GET` | `/api/v1/config/export` | 导出配置为 YAML（支持 `?include_secrets=true`） |
+| `POST` | `/api/v1/config/import` | 导入 YAML 配置（校验后返回预览，不自动应用） |
+| `POST` | `/api/v1/config/validate` | 校验配置格式 |
+
+#### POST /api/v1/config/import
+
+```json
+{"yaml": "mode: Transform\nproviders:\n  test:\n    base_url: https://test.api.com\n    api_key: sk-test-key\n    offers:\n      - model: gpt-4o\nmodels:\n  gpt-4o:\n    display_name: GPT-4o\n"}
+```
+
+响应：
+
+```json
+{
+  "providers": 1,
+  "models": 1,
+  "routes": 0,
+  "has_defaults": false,
+  "has_web_search": false,
+  "warnings": [],
+  "message": "配置已通过校验，请确认后通过 changes apply 使其生效"
+}
+```
+
+### 变更管理
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `GET` | `/api/v1/changes` | 列出所有待应用变更 |
+| `POST` | `/api/v1/changes/apply` | 应用所有待处理变更（事务性，失败自动回滚） |
+| `POST` | `/api/v1/changes/discard` | 丢弃所有待处理变更 |
+
+#### POST /api/v1/changes/apply 响应
+
+```json
+{"status": "success", "message": "变更已应用生效"}
+```
+
+#### ChangeRow 对象
+
+```json
+{
+  "id": 42,
+  "batch_id": "",
+  "action": "create",
+  "resource": "provider",
+  "target_key": "deepseek-v4",
+  "before": "",
+  "after": "{\"base_url\":\"https://api.deepseek.com\",\"api_key\":\"sk-...\",\"version\":\"v1\",\"protocol\":\"anthropic\"}",
+  "applied": false,
+  "error": "",
+  "revision": 0,
+  "created_at": "2026-05-01T12:00:00Z",
+  "applied_at": ""
+}
+```
+
+### 状态与统计
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `GET` | `/api/v1/status` | 系统概览（Provider/Route 数量、运行模式、监听地址） |
+| `GET` | `/api/v1/status/providers` | Provider 健康状态列表 |
+| `GET` | `/api/v1/sessions` | 活跃会话列表（Key 脱敏） |
+| `GET` | `/api/v1/stats` | 完整统计信息 |
+| `GET` | `/api/v1/stats/summary` | 统计摘要（请求数、Token、缓存命中率、总费用） |
+| `GET` | `/api/v1/logs` | 日志条目（当前返回空列表，等待日志环形缓冲区实现） |
+| `GET` | `/api/v1/version` | 版本信息 |
+
+### 设置
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `GET` | `/api/v1/defaults` | 获取默认配置 |
+| `PUT` | `/api/v1/defaults` | 更新默认配置 |
+| `GET` | `/api/v1/web-search` | 获取 Web Search 配置 |
+| `PUT` | `/api/v1/web-search` | 更新 Web Search 配置 |
+| `GET` | `/api/v1/extensions` | 列出已注册扩展 |
+| `GET` | `/api/v1/extensions/{name}` | 获取扩展详情 |
+| `PUT` | `/api/v1/extensions/{name}` | 更新扩展配置 |
+
+### 错误格式
+
+所有管理 API 错误使用统一格式：
+
+```json
+{
+  "error": {
+    "code": "not_found",
+    "message": "provider \"nonexistent\" 不存在"
+  }
+}
+```
+
+常见错误码：`invalid_json`、`validation_error`、`not_found`、`referenced`、`stage_error`、`apply_error`、`list_error`、`discard_error`、`export_error`、`parse_error`。
+
+### 分页格式
+
+列表端点支持 `limit`（默认 20，最大 100）和 `offset`（默认 0）查询参数：
+
+```json
+{
+  "data": [...],
+  "total": 42,
+  "limit": 20,
+  "offset": 0
+}
+```

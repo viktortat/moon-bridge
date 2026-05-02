@@ -25,6 +25,10 @@ import (
 	"moonbridge/internal/service/provider"
 	"moonbridge/internal/service/stats"
 	mbtrace "moonbridge/internal/service/trace"
+
+	"moonbridge/internal/service/api"
+	"moonbridge/internal/service/runtime"
+	"moonbridge/internal/service/store"
 )
 
 // Provider defines the upstream interface for creating messages.
@@ -43,6 +47,8 @@ type Config struct {
 	Stats            *stats.SessionStats
 	PluginRegistry   *plugin.Registry
 	AppConfig        config.Config // full app config for per-provider resolution
+	Runtime  *runtime.Runtime  // optional; when set, Current().Config takes priority over AppConfig
+	Store    store.ConfigStore  // optional; API management endpoints
 }
 
 type Server struct {
@@ -60,6 +66,8 @@ type Server struct {
 	sessionPruneStop chan struct{}
 	onceClose        sync.Once
 	appConfig        config.Config
+	runtime          *runtime.Runtime
+	store            store.ConfigStore
 }
 
 type serverSession struct {
@@ -83,6 +91,8 @@ func New(cfg Config) *Server {
 		sessions:         map[string]serverSession{},
 		sessionPruneStop: make(chan struct{}),
 		appConfig:        cfg.AppConfig,
+		runtime:          cfg.Runtime,
+		store:            cfg.Store,
 	}
 	server.mux.HandleFunc("/v1/responses", server.handleResponses)
 	server.mux.HandleFunc("/responses", server.handleResponses)
@@ -90,11 +100,15 @@ func New(cfg Config) *Server {
 	server.mux.HandleFunc("/models", server.handleModels)
 	go server.startSessionPruning()
 	server.registerPluginRoutes()
+	if cfg.Runtime != nil && cfg.Store != nil {
+		apiRouter := api.NewRouter(server.store, server.runtime, server.stats, server.pluginRegistry, server)
+		server.mux.Handle("/api/v1/", http.StripPrefix("/api/v1", apiRouter))
+	}
 	return server
 }
 
 func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
-	if token := server.appConfig.AuthToken; token != "" {
+	if token := server.currentConfig().AuthToken; token != "" {
 		if !checkAuth(request, token) {
 			writer.Header().Set("Content-Type", "application/json")
 			writer.WriteHeader(http.StatusUnauthorized)
@@ -129,7 +143,45 @@ func (server *Server) handleModels(writer http.ResponseWriter, request *http.Req
 }
 
 func (server *Server) listModels() []codex.ModelInfo {
-	return codex.BuildModelInfosFromConfig(server.appConfig)
+	return codex.BuildModelInfosFromConfig(server.currentConfig())
+}
+
+// currentConfig returns the effective configuration.
+// When runtime is set (runtime mode), the runtime snapshot config takes priority.
+// Otherwise, the static AppConfig is used.
+func (server *Server) currentConfig() config.Config {
+	if server.runtime != nil {
+		return server.runtime.Current().Config
+	}
+	return server.appConfig
+}
+
+
+// CurrentConfig returns an interface for reading the effective config.
+// Satisfies the api.ConfigAccessor interface expected by api.NewRouter.
+func (server *Server) CurrentConfig() api.ConfigAccessor {
+	return server
+}
+// AuthToken returns the current authentication token.
+// Satisfies the api.ConfigAccessor interface.
+func (server *Server) AuthToken() string {
+	return server.currentConfig().AuthToken
+}
+
+// ListSessions returns snapshot info for all active sessions.
+// Satisfies the server interface expected by api.NewRouter.
+func (server *Server) ListSessions() []api.SessionInfo {
+	server.sessionsMu.Lock()
+	defer server.sessionsMu.Unlock()
+	result := make([]api.SessionInfo, 0, len(server.sessions))
+	for key, entry := range server.sessions {
+		result = append(result, api.SessionInfo{
+			Key:       key,
+			CreatedAt: entry.sess.CreatedAt.Format(time.RFC3339),
+			LastUsed:  entry.lastUsed.Format(time.RFC3339),
+		})
+	}
+	return result
 }
 
 // onRequestCompleted dispatches a RequestCompletionHook event to all enabled
@@ -1186,17 +1238,17 @@ func (server *Server) maybeWrapProvider(client *anthropic.Client, modelAlias str
 	}
 	resolved := server.providerMgr.ResolvedWebSearchForModel(modelAlias)
 	if resolved == "injected" {
-		tavilyKey := server.appConfig.WebSearchTavilyKeyForModel(modelAlias)
-		firecrawlKey := server.appConfig.WebSearchFirecrawlKeyForModel(modelAlias)
-		maxRounds := server.appConfig.WebSearchMaxRoundsForModel(modelAlias)
-		slog.Default().Debug("包装注入式搜索编排器", "model", modelAlias)
+		tavilyKey := server.currentConfig().WebSearchTavilyKeyForModel(modelAlias)
+		firecrawlKey := server.currentConfig().WebSearchFirecrawlKeyForModel(modelAlias)
+		maxRounds := server.currentConfig().WebSearchMaxRoundsForModel(modelAlias)
+		logger.L().Debug("包装注入式搜索编排器", "model", modelAlias)
 		wrapped = websearchinjected.WrapProvider(client, tavilyKey, firecrawlKey, maxRounds)
 	}
 	return server.maybeWrapVisual(wrapped, modelAlias)
 }
 
 func (server *Server) maybeWrapVisual(provider Provider, modelAlias string) Provider {
-	visualCfg, ok := visual.ConfigForModel(server.appConfig, modelAlias)
+	visualCfg, ok := visual.ConfigForModel(server.currentConfig(), modelAlias)
 	if !ok {
 		return provider
 	}
@@ -1228,8 +1280,8 @@ func (server *Server) resolveRequestOptions(modelAlias string, route *provider.R
 	}
 	return bridge.RequestOptions{
 		WebSearchMode:    wsMode,
-		WebSearchMaxUses: server.appConfig.WebSearchMaxUsesForModel(modelAlias),
-		FirecrawlAPIKey:  server.appConfig.WebSearchFirecrawlKeyForModel(modelAlias),
+		WebSearchMaxUses: server.currentConfig().WebSearchMaxUsesForModel(modelAlias),
+		FirecrawlAPIKey:  server.currentConfig().WebSearchFirecrawlKeyForModel(modelAlias),
 	}
 }
 
@@ -1509,4 +1561,3 @@ func hasModalityImage(modalities []string) bool {
 	}
 	return false
 }
-

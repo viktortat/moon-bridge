@@ -49,6 +49,7 @@ docker-compose.yml
 node_modules/
 build/
 .wrangler/
+# WebUI build artifacts (source in webui/)
 
 # Wrangler dev vars
 .dev.vars

@@ -470,3 +470,15 @@ func (r *Registry) DBConsumers() []DBConsumer {
 	}
 	return result
 }
+
+// Plugins returns the names of all registered plugins.
+func (r *Registry) Plugins() []string {
+	if r == nil {
+		return nil
+	}
+	names := make([]string, 0, len(r.plugins))
+	for _, p := range r.plugins {
+		names = append(names, p.Name())
+	}
+	return names
+}

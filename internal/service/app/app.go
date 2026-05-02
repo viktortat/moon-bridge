@@ -12,12 +12,14 @@ import (
 	"moonbridge/internal/extension/pluginhooks"
 	"moonbridge/internal/foundation/config"
 	"moonbridge/internal/foundation/db"
+	"moonbridge/internal/service/store"
 	"moonbridge/internal/foundation/logger"
 	"moonbridge/internal/protocol/anthropic"
 	"moonbridge/internal/protocol/bridge"
 	"moonbridge/internal/protocol/cache"
 	"moonbridge/internal/service/provider"
 	"moonbridge/internal/service/proxy"
+	"moonbridge/internal/service/runtime"
 	"moonbridge/internal/service/server"
 	"moonbridge/internal/service/stats"
 	mbtrace "moonbridge/internal/service/trace"
@@ -50,7 +52,9 @@ func RunServer(ctx context.Context, cfg config.Config, errors io.Writer) error {
 }
 
 func runTransform(ctx context.Context, cfg config.Config, errors io.Writer) error {
-	// Build multi-provider infrastructure.
+	// === Phase 1: Bootstrap from YAML ===
+
+	// Build multi-provider infrastructure from YAML config.
 	providerDefs := buildProviderDefsFromConfig(cfg)
 	modelRoutes := buildModelRoutesFromConfig(cfg)
 	providerMgr, err := provider.NewProviderManager(providerDefs, modelRoutes)
@@ -59,54 +63,15 @@ func runTransform(ctx context.Context, cfg config.Config, errors io.Writer) erro
 	}
 
 	// Resolve a fallback client for web search probing and server fallback.
-	// When no "default" provider is configured, probe and fallback are skipped.
 	defaultClient := resolveDefaultClient(providerMgr, errors)
 	resolvePerProviderWebSearch(ctx, cfg, providerMgr, errors)
 
 	sessionStats := stats.NewSessionStats()
-	// Set per-model pricing from routes and provider/model direct references
-	pricing := make(map[string]stats.ModelPricing)
-	for alias, route := range cfg.Routes {
-		if route.InputPrice > 0 || route.OutputPrice > 0 || route.CacheWritePrice > 0 || route.CacheReadPrice > 0 {
-			pricing[alias] = stats.ModelPricing{
-				InputPrice:      route.InputPrice,
-				OutputPrice:     route.OutputPrice,
-				CacheWritePrice: route.CacheWritePrice,
-				CacheReadPrice:  route.CacheReadPrice,
-			}
-		}
-	}
-	// Also index pricing by provider/model or model(provider) slug for direct references.
-	for providerKey, def := range cfg.ProviderDefs {
-		for modelName, meta := range def.Models {
-			slug := providerKey + "/" + modelName
-			newSlug := modelName + "(" + providerKey + ")"
-			if _, exists := pricing[slug]; exists {
-				// route alias already has pricing (may differ from model meta);
-				// still index the new format key if not already set.
-				if _, exists := pricing[newSlug]; !exists {
-					pricing[newSlug] = pricing[slug]
-				}
-				continue
-			}
-			if meta.InputPrice > 0 || meta.OutputPrice > 0 || meta.CacheWritePrice > 0 || meta.CacheReadPrice > 0 {
-				p := stats.ModelPricing{
-					InputPrice:      meta.InputPrice,
-					OutputPrice:     meta.OutputPrice,
-					CacheWritePrice: meta.CacheWritePrice,
-					CacheReadPrice:  meta.CacheReadPrice,
-				}
-				pricing[slug] = p
-				pricing[newSlug] = p
-        if _, exists := pricing[modelName]; !exists {
-        	pricing[modelName] = p
-        }
-			}
-		}
-	}
+	pricing := buildPricingMap(cfg)
 	if len(pricing) > 0 {
 		sessionStats.SetPricing(pricing)
 	}
+
 	tracer := mbtrace.New(mbtrace.Config{
 		Enabled: cfg.TraceRequests,
 		Root:    transformTraceRoot(),
@@ -114,7 +79,6 @@ func runTransform(ctx context.Context, cfg config.Config, errors io.Writer) erro
 	logTrace(errors, "transform", tracer)
 
 	// Determine the default provider to use as the fallback Provider.
-	// *anthropic.Client directly implements server.Provider.
 	var fallbackProvider server.Provider
 	if defaultClient != nil {
 		fallbackProvider = defaultClient
@@ -144,10 +108,58 @@ func runTransform(ctx context.Context, cfg config.Config, errors io.Writer) erro
 			dbRegistry.RegisterConsumer(cons)
 		}
 	}
+	// Register the config_store consumer for configuration persistence.
+	configStoreConsumer := store.NewConfigStoreConsumer(logger.L())
+	dbRegistry.RegisterConsumer(configStoreConsumer)
 	if err := dbRegistry.Init(ctx, cfg.Persistence.ActiveProvider); err != nil {
 		return fmt.Errorf("init persistence: %w", err)
 	}
 	defer dbRegistry.Shutdown()
+
+	// === Phase 2: ConfigStore bootstrap ===
+	// Check if the store is available and has existing data.
+	cs := configStoreConsumer.Store()
+	if cs != nil {
+		if dbCfg, loadErr := cs.LoadAll(); loadErr == nil {
+			if len(dbCfg.ProviderDefs) > 0 || len(dbCfg.Routes) > 0 {
+				// DB has existing configuration: use it as the active config.
+				logger.Info("从持久化存储加载配置",
+					"providers", len(dbCfg.ProviderDefs),
+					"routes", len(dbCfg.Routes))
+				cfg = *dbCfg
+
+				// Rebuild provider manager and pricing from DB-loaded config.
+				providerDefs = buildProviderDefsFromConfig(cfg)
+				modelRoutes = buildModelRoutesFromConfig(cfg)
+				providerMgr, err = provider.NewProviderManager(providerDefs, modelRoutes)
+				if err != nil {
+					return fmt.Errorf("rebuild provider manager from DB: %w", err)
+				}
+				_ = resolveDefaultClient(providerMgr, errors)
+				resolvePerProviderWebSearch(ctx, cfg, providerMgr, errors)
+
+				pricing = buildPricingMap(cfg)
+				if len(pricing) > 0 {
+					sessionStats.SetPricing(pricing)
+				}
+			} else {
+				// DB is empty: seed from YAML config.
+				logger.Info("持久化存储为空，从 YAML 导入种子配置")
+				if err := cs.SeedFromConfig(&cfg); err != nil {
+					logger.Warn("config store 种子导入失败", "error", err)
+				}
+			}
+		} else {
+			logger.Warn("config store 加载失败", "error", loadErr)
+		}
+	} else {
+		logger.Warn("config store 不可用，跳过持久化引导")
+	}
+
+	// === Phase 3: Build Runtime ===
+	rt := runtime.NewRuntime(cfg, providerMgr, pricing)
+
+	// === Phase 4: Build Server with Runtime ===
 	handler := server.New(server.Config{
 		Bridge:         bridge.New(cfg, cache.NewMemoryRegistry(), pluginhooks.PluginHooksFromRegistry(plugins)),
 		Provider:       fallbackProvider,
@@ -157,9 +169,11 @@ func runTransform(ctx context.Context, cfg config.Config, errors io.Writer) erro
 		Stats:          sessionStats,
 		PluginRegistry: plugins,
 		AppConfig:      cfg,
+		Runtime:        rt,
 	})
 
-	return runHTTPServer(ctx, cfg.Addr, handler, errors, sessionStats)
+	wrapped := handler
+	return runHTTPServer(ctx, cfg.Addr, wrapped, errors, sessionStats)
 }
 
 // resolveDefaultClient returns the provider client for the default key.
@@ -216,12 +230,52 @@ func buildModelRoutesFromConfig(cfg config.Config) map[string]provider.ModelRout
 	return routes
 }
 
+// buildPricingMap computes a pricing map from routes and provider models.
+func buildPricingMap(cfg config.Config) map[string]stats.ModelPricing {
+	pricing := make(map[string]stats.ModelPricing)
+	for alias, route := range cfg.Routes {
+		if route.InputPrice > 0 || route.OutputPrice > 0 || route.CacheWritePrice > 0 || route.CacheReadPrice > 0 {
+			pricing[alias] = stats.ModelPricing{
+				InputPrice:      route.InputPrice,
+				OutputPrice:     route.OutputPrice,
+				CacheWritePrice: route.CacheWritePrice,
+				CacheReadPrice:  route.CacheReadPrice,
+			}
+		}
+	}
+	for providerKey, def := range cfg.ProviderDefs {
+		for modelName, meta := range def.Models {
+			slug := providerKey + "/" + modelName
+			newSlug := modelName + "(" + providerKey + ")"
+			if _, exists := pricing[slug]; exists {
+				if _, exists := pricing[newSlug]; !exists {
+					pricing[newSlug] = pricing[slug]
+				}
+				continue
+			}
+			if meta.InputPrice > 0 || meta.OutputPrice > 0 || meta.CacheWritePrice > 0 || meta.CacheReadPrice > 0 {
+				p := stats.ModelPricing{
+					InputPrice:      meta.InputPrice,
+					OutputPrice:     meta.OutputPrice,
+					CacheWritePrice: meta.CacheWritePrice,
+					CacheReadPrice:  meta.CacheReadPrice,
+				}
+				pricing[slug] = p
+				pricing[newSlug] = p
+				if _, exists := pricing[modelName]; !exists {
+					pricing[modelName] = p
+				}
+			}
+		}
+	}
+	return pricing
+}
+
+// webSearchProber interface and following functions are unchanged.
 type webSearchProber interface {
 	ProbeWebSearch(context.Context, string) (bool, error)
 }
 
-// resolvePerProviderWebSearch resolves web_search support for each provider and
-// each model that has a model-level override.
 // resolvePerProviderWebSearch resolves web_search support for each provider and
 // each model that has a model-level override.
 func resolvePerProviderWebSearch(ctx context.Context, cfg config.Config, pm *provider.ProviderManager, errors io.Writer) {
@@ -249,9 +303,6 @@ func resolvePerProviderWebSearch(ctx context.Context, cfg config.Config, pm *pro
 				pm.SetResolvedWebSearch(key, resolved)
 			}
 		case config.ProtocolOpenAIResponse:
-			// OpenAI Responses API natively supports the web_search tool type.
-			// Auto-discovery is unnecessary: "auto"/"enabled"/empty all enable it.
-			// "injected" mode (Tavily/Firecrawl) is Anthropic-only; map to "disabled".
 			switch support {
 			case config.WebSearchSupportDisabled, config.WebSearchSupportInjected:
 				pm.SetResolvedWebSearch(key, "disabled")
@@ -274,7 +325,6 @@ func resolvePerProviderWebSearch(ctx context.Context, cfg config.Config, pm *pro
 			modelWS := cfg.WebSearchForModel(alias)
 			resolveModelWebSearch(ctx, alias, modelWS, providerWS, pm, errors)
 			resolveModelWebSearch(ctx, newAlias, modelWS, providerWS, pm, errors)
-			// Resolve pure model name for this provider's catalog.
 			pureWS := cfg.WebSearchForModel(modelName)
 			resolveModelWebSearch(ctx, modelName, pureWS, providerWS, pm, errors)
 		}
@@ -288,16 +338,13 @@ func resolvePerProviderWebSearch(ctx context.Context, cfg config.Config, pm *pro
 
 func resolveModelWebSearch(ctx context.Context, alias string, modelWS config.WebSearchSupport, providerWS config.WebSearchSupport, pm *provider.ProviderManager, errors io.Writer) {
 	if modelWS == providerWS {
-		return // no model-level override, provider resolution applies
+		return
 	}
 	modelKey := "model:" + alias
 	protocol := pm.ProtocolForModel(alias)
 	switch protocol {
 	case config.ProtocolAnthropic:
-		// Continue to Anthropic-specific handling below.
 	case config.ProtocolOpenAIResponse:
-		// OpenAI Responses API natively supports web_search.
-		// "injected" mode (Tavily/Firecrawl) is Anthropic-only; map to "disabled".
 		switch modelWS {
 		case config.WebSearchSupportDisabled, config.WebSearchSupportInjected:
 			pm.SetResolvedWebSearch(modelKey, "disabled")
@@ -323,14 +370,11 @@ func resolveModelWebSearch(ctx context.Context, alias string, modelWS config.Web
 		pm.SetResolvedWebSearch(modelKey, "injected")
 		slog.Info("模型配置启用网页搜索注入模式", "model", alias)
 	default:
-		// Auto: probe using this model's upstream name.
 		resolved := probeModelWebSearch(ctx, alias, pm, errors)
 		pm.SetResolvedWebSearch(modelKey, resolved)
 	}
 }
 
-// probeProviderWebSearch probes a single provider for web_search support.
-// Returns "enabled" or "disabled".
 func probeProviderWebSearch(ctx context.Context, key string, pm *provider.ProviderManager, errors io.Writer) string {
 	client, err := pm.ClientForKey(key)
 	if err != nil {
@@ -361,7 +405,6 @@ func probeProviderWebSearch(ctx context.Context, key string, pm *provider.Provid
 	return "enabled"
 }
 
-// probeModelWebSearch probes a specific model alias for web_search support.
 func probeModelWebSearch(ctx context.Context, modelAlias string, pm *provider.ProviderManager, errors io.Writer) string {
 	upstreamModel, client, err := pm.ClientFor(modelAlias)
 	if err != nil {
@@ -486,3 +529,4 @@ func DumpConfigSchema(configPath string) error {
 		ExtensionSpecs: BuiltinExtensions().ConfigSpecs(),
 	})
 }
+

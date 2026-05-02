@@ -295,3 +295,144 @@ func TestResolveModel_ProviderPriority(t *testing.T) {
 		}
 	}
 }
+
+func TestReloadAfterInitialCreation(t *testing.T) {
+	manager, err := NewProviderManager(map[string]ProviderConfig{
+		"default": {
+			BaseURL:    "https://initial.test",
+			APIKey:     "key-initial",
+			ModelNames: []string{"model-a"},
+		},
+	}, map[string]ModelRoute{
+		"test-model": {Provider: "default", Name: "model-a"},
+	})
+	if err != nil {
+		t.Fatalf("NewProviderManager() error = %v", err)
+	}
+
+	// Verify initial route.
+	if _, _, err := manager.ClientFor("test-model"); err != nil {
+		t.Fatalf("ClientFor(test-model) before reload error = %v", err)
+	}
+	if upstream := manager.UpstreamModelFor("test-model"); upstream != "model-a" {
+		t.Fatalf("UpstreamModelFor(test-model) before reload = %q, want %q", upstream, "model-a")
+	}
+
+	// Reload with new config.
+	newCfg := config.Config{
+		ProviderDefs: map[string]config.ProviderDef{
+			"default": {
+				BaseURL: "https://reloaded.test",
+				APIKey:  "key-reloaded",
+				Models:  map[string]config.ModelMeta{"model-b": {ContextWindow: 20000}},
+			},
+		},
+		Routes: map[string]config.RouteEntry{
+			"new-model": {Provider: "default", Model: "model-b"},
+		},
+	}
+
+	if err := manager.Reload(newCfg); err != nil {
+		t.Fatalf("Reload() error = %v", err)
+	}
+
+	// Old route should be gone; UpstreamModelFor falls back to model name as-is.
+	if upstream := manager.UpstreamModelFor("test-model"); upstream != "test-model" {
+		t.Fatalf("UpstreamModelFor(test-model) after reload = %q, want %q (fallback)", upstream, "test-model")
+	}
+	// ResolveModel should fail for the old route alias (no longer in routes map).
+	if _, err := manager.ResolveModel("test-model"); err == nil {
+		t.Fatal("ResolveModel(test-model) should fail after reload (route removed)")
+	}
+
+	// New model should work.
+	if _, _, err := manager.ClientFor("new-model"); err != nil {
+		t.Fatalf("ClientFor(new-model) after reload error = %v", err)
+	}
+	if upstream := manager.UpstreamModelFor("new-model"); upstream != "model-b" {
+		t.Fatalf("UpstreamModelFor(new-model) after reload = %q, want %q", upstream, "model-b")
+	}
+
+	// Base URL should be the reloaded one.
+	if url := manager.ProviderBaseURL("default"); url != "https://reloaded.test" {
+		t.Fatalf("ProviderBaseURL(default) after reload = %q, want %q", url, "https://reloaded.test")
+	}
+}
+
+func TestReloadFailurePreservesOldState(t *testing.T) {
+	manager, err := NewProviderManager(map[string]ProviderConfig{
+		"default": {
+			BaseURL:    "https://initial.test",
+			APIKey:     "key-initial",
+			ModelNames: []string{"model-a"},
+		},
+	}, map[string]ModelRoute{
+		"test-model": {Provider: "default", Name: "model-a"},
+	})
+	if err != nil {
+		t.Fatalf("NewProviderManager() error = %v", err)
+	}
+
+	// Verify initial route works.
+	if _, _, err := manager.ClientFor("test-model"); err != nil {
+		t.Fatalf("ClientFor(test-model) before reload error = %v", err)
+	}
+
+	// Reload with invalid config (empty provider defs with no models/routes = invalid).
+	badCfg := config.Config{
+		ProviderDefs: map[string]config.ProviderDef{
+			"": {BaseURL: "", APIKey: ""}, // invalid key
+		},
+	}
+
+	err = manager.Reload(badCfg)
+	if err == nil {
+		t.Fatal("Reload() with invalid config should return error")
+	}
+	t.Logf("Expected reload error: %v", err)
+
+	// Old state must be preserved.
+	if upstream := manager.UpstreamModelFor("test-model"); upstream != "model-a" {
+		t.Fatalf("UpstreamModelFor(test-model) after failed reload = %q, want %q", upstream, "model-a")
+	}
+	if upstream := manager.UpstreamModelFor("test-model"); upstream != "model-a" {
+		t.Fatalf("UpstreamModelFor after failed reload = %q, want %q", upstream, "model-a")
+	}
+	if url := manager.ProviderBaseURL("default"); url != "https://initial.test" {
+		t.Fatalf("ProviderBaseURL after failed reload = %q, want %q", url, "https://initial.test")
+	}
+}
+
+func TestReloadResolvedWebSearch(t *testing.T) {
+	manager, err := NewProviderManager(map[string]ProviderConfig{
+		"default": {
+			BaseURL: "https://initial.test",
+			APIKey:  "key-initial",
+		},
+	}, nil)
+	if err != nil {
+		t.Fatalf("NewProviderManager() error = %v", err)
+	}
+
+	manager.SetResolvedWebSearch("default", "enabled")
+	if got := manager.ResolvedWebSearch("default"); got != "enabled" {
+		t.Fatalf("ResolvedWebSearch before reload = %q, want %q", got, "enabled")
+	}
+
+	// Reload — resolved web search should be empty again (new manager).
+	reloadCfg := config.Config{
+		ProviderDefs: map[string]config.ProviderDef{
+			"default": {
+				BaseURL: "https://reloaded.test",
+				APIKey:  "key-reloaded",
+			},
+		},
+	}
+	if err := manager.Reload(reloadCfg); err != nil {
+		t.Fatalf("Reload() error = %v", err)
+	}
+
+	if got := manager.ResolvedWebSearch("default"); got != "" {
+		t.Fatalf("ResolvedWebSearch after reload should be empty, got %q", got)
+	}
+}
