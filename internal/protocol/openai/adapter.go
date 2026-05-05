@@ -326,6 +326,7 @@ func (a *OpenAIAdapter) streamLoop(ctx context.Context, coreReq *format.CoreRequ
 	toolCallArgs := make(map[int]string)
 	outputIndexes := make(map[int]int)
 	itemIDs := make(map[int]string)
+	reasonIndexes := make(map[int]bool)
 
 	for event := range events {
 		// Let hooks skip events.
@@ -382,10 +383,29 @@ func (a *OpenAIAdapter) streamLoop(ctx context.Context, coreReq *format.CoreRequ
 				itemIDs[index] = id
 				contentText[index] = ""
 
-
 			case "reasoning":
-				id := fmt.Sprintf("msg_item_%d", index)
+				id := fmt.Sprintf("rs_item_%d", index)
 				itemIDs[index] = id
+				contentText[index] = ""
+				reasonIndexes[index] = true
+				io := len(response.Output)
+				outputIndexes[index] = io
+				response.Output = append(response.Output, OutputItem{
+					Type:   "reasoning",
+					ID:     id,
+					Status: "in_progress",
+					Summary: []ReasoningItemSummary{},
+				})
+				send(StreamEvent{
+					Event: "response.reasoning_summary_part.added",
+					Data: ReasoningSummaryPartAddedEvent{
+						Type:           "response.reasoning_summary_part.added",
+						SequenceNumber: next(),
+						ItemID:         id,
+						OutputIndex:    io,
+						SummaryIndex:   0,
+					},
+				})
 				contentText[index] = ""
 			case "tool_use":
 				toolUseID := event.ContentBlock.ToolUseID
@@ -420,6 +440,22 @@ func (a *OpenAIAdapter) streamLoop(ctx context.Context, coreReq *format.CoreRequ
 		case format.CoreTextDelta:
 			index := event.Index
 			contentText[index] += event.Delta
+
+			// Reasoning blocks use separate SSE events.
+			if reasonIndexes[index] {
+				send(StreamEvent{
+					Event: "response.reasoning_summary_text.delta",
+					Data: ReasoningSummaryTextDeltaEvent{
+						Type:           "response.reasoning_summary_text.delta",
+						SequenceNumber: next(),
+						ItemID:         itemIDs[index],
+						OutputIndex:    outputIndexes[index],
+						SummaryIndex:   0,
+						Delta:          event.Delta,
+					},
+				})
+				break
+			}
 
 			// Ensure the output item and content part exist.
 			if _, exists := outputIndexes[index]; !exists {
@@ -616,6 +652,32 @@ func (a *OpenAIAdapter) streamLoop(ctx context.Context, coreReq *format.CoreRequ
 		case format.CoreContentBlockDone:
 			index := event.Index
 
+
+			// Reasoning block done — emit reasoning summary part done.
+			if reasonIndexes[index] {
+				if idx, ok := outputIndexes[index]; ok && idx < len(response.Output) {
+					response.Output[idx].Status = "completed"
+					response.Output[idx].Summary = []ReasoningItemSummary{{
+						Type: "text",
+						Text: contentText[index],
+					}}
+				}
+				send(StreamEvent{
+					Event: "response.reasoning_summary_part.done",
+					Data: ReasoningSummaryPartDoneEvent{
+						Type:           "response.reasoning_summary_part.done",
+						SequenceNumber: next(),
+						ItemID:         itemIDs[index],
+						OutputIndex:    outputIndexes[index],
+						SummaryIndex:   0,
+					},
+				})
+				delete(contentText, index)
+				delete(itemIDs, index)
+				delete(outputIndexes, index)
+				delete(reasonIndexes, index)
+				break
+			}
 			// 1. Text/reasoning block done — emit output_text.done + content_part.done + output_item.done.
 			if text, ok := contentText[index]; ok {
 				itemID := itemIDs[index]
