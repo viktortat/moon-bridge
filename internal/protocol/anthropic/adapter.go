@@ -203,6 +203,7 @@ type streamConverterState struct {
 	model           string
 	blockTypes      map[int]string // content index → block type
 	blockSignatures map[int]string // content index → reasoning signature (from signature_delta)
+	finalUsage      *format.CoreUsage // tracked from message_delta, passed to message_stop
 }
 
 // ToCoreStream consumes an anthropic.Stream and returns a channel of CoreStreamEvent.
@@ -395,13 +396,14 @@ func (s *streamConverterState) convertEvent(events chan<- format.CoreStreamEvent
 
 	case "message_delta":
 		if ev.Usage != nil {
+			s.finalUsage = &format.CoreUsage{
+				InputTokens:       ev.Usage.InputTokens,
+				OutputTokens:      ev.Usage.OutputTokens,
+				CachedInputTokens: ev.Usage.CacheReadInputTokens,
+			}
 			s.emit(events, format.CoreStreamEvent{
 				Type: format.CoreEventInProgress,
-				Usage: &format.CoreUsage{
-					InputTokens:       ev.Usage.InputTokens,
-					OutputTokens:      ev.Usage.OutputTokens,
-					CachedInputTokens: ev.Usage.CacheReadInputTokens,
-				},
+				Usage:      s.finalUsage,
 				StopReason: ev.Delta.StopReason,
 			})
 		}
@@ -409,6 +411,7 @@ func (s *streamConverterState) convertEvent(events chan<- format.CoreStreamEvent
 	case "message_stop":
 		s.emit(events, format.CoreStreamEvent{
 			Type:   format.CoreEventCompleted,
+			Usage:  s.finalUsage,
 			Status: "completed",
 			Model:  s.model,
 		})
