@@ -1,11 +1,7 @@
-// Package codex concentrates Codex CLI client compatibility logic,
-// including model catalog DTOs, config generation, toolcall codec,
-// and custom grammar helpers.
+// Package codex provides Codex CLI model catalog DTOs and config generation.
 //
-// This package lives in internal/extensions so it can be shared by
-// internal/server, internal/bridge, and cmd/moonbridge without
-// creating circular dependencies. It depends only on lower-level
-// packages (internal/openai, internal/anthropic, internal/config).
+// It is shared by internal/server and cmd/moonbridge to produce
+// model catalog JSON and Codex config.toml fragments.
 package codex
 
 import (

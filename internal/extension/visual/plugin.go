@@ -6,6 +6,7 @@ import (
 
 	"moonbridge/internal/extension/plugin"
 	"moonbridge/internal/foundation/config"
+	"moonbridge/internal/protocol/format"
 	"moonbridge/internal/protocol/anthropic"
 )
 
@@ -53,6 +54,11 @@ func (p *Plugin) EnabledForModel(model string) bool {
 
 func (p *Plugin) InjectTools(_ *plugin.RequestContext) []anthropic.Tool {
 	return Tools()
+}
+
+// CoreInjectTools returns Core-format tool definitions for visual analysis.
+func (p *Plugin) CoreInjectTools(_ *plugin.RequestContext) []format.CoreTool {
+	return CoreTools()
 }
 
 func ConfigSpecs() []config.ExtensionConfigSpec {

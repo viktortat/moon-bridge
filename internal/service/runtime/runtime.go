@@ -65,8 +65,8 @@ func (rt *Runtime) Reload(cfg config.Config) error {
 	}
 
 	// Build provider definitions and routes.
-	providerDefs := buildProviderDefsFromConfig(cfg)
-	modelRoutes := buildModelRoutesFromConfig(cfg)
+	providerDefs := provider.BuildProviderDefsFromConfig(cfg)
+	modelRoutes := provider.BuildModelRoutesFromConfig(cfg)
 
 	// Build new provider manager.
 	providerMgr, err := provider.NewProviderManager(providerDefs, modelRoutes)
@@ -75,7 +75,7 @@ func (rt *Runtime) Reload(cfg config.Config) error {
 	}
 
 	// Compute pricing from the new config.
-	pricing := buildPricingFromConfig(cfg)
+	pricing := provider.BuildPricingFromConfig(cfg)
 
 	// Create and atomically store the new snapshot.
 	snapshot := &ConfigSnapshot{
@@ -85,84 +85,4 @@ func (rt *Runtime) Reload(cfg config.Config) error {
 	}
 	rt.snapshot.Store(snapshot)
 	return nil
-}
-
-// buildProviderDefsFromConfig converts config into provider definition map.
-func buildProviderDefsFromConfig(cfg config.Config) map[string]provider.ProviderConfig {
-	defs := make(map[string]provider.ProviderConfig, len(cfg.ProviderDefs))
-	for key, def := range cfg.ProviderDefs {
-		modelNames := make([]string, 0, len(def.Models))
-		for name := range def.Models {
-			modelNames = append(modelNames, name)
-		}
-		models := make(map[string]provider.ModelMeta, len(def.Models))
-		for name, meta := range def.Models {
-			models[name] = provider.ModelMeta(meta)
-		}
-		defs[key] = provider.ProviderConfig{
-			BaseURL:          def.BaseURL,
-			APIKey:           def.APIKey,
-			Version:          def.Version,
-			UserAgent:        def.UserAgent,
-			Protocol:         def.Protocol,
-			WebSearchSupport: string(def.WebSearchSupport),
-			ModelNames:       modelNames,
-			Models:           models,
-			Offers:           def.Offers,
-		}
-	}
-	return defs
-}
-
-// buildModelRoutesFromConfig converts config model entries into route definitions.
-func buildModelRoutesFromConfig(cfg config.Config) map[string]provider.ModelRoute {
-	routes := make(map[string]provider.ModelRoute, len(cfg.Routes))
-	for alias, route := range cfg.Routes {
-		routes[alias] = provider.ModelRoute{
-			Provider: route.Provider,
-			Name:     route.Model,
-		}
-	}
-	return routes
-}
-
-// buildPricingFromConfig computes a pricing map from routes and provider models.
-func buildPricingFromConfig(cfg config.Config) map[string]stats.ModelPricing {
-	pricing := make(map[string]stats.ModelPricing)
-	for alias, route := range cfg.Routes {
-		if route.InputPrice > 0 || route.OutputPrice > 0 || route.CacheWritePrice > 0 || route.CacheReadPrice > 0 {
-			pricing[alias] = stats.ModelPricing{
-				InputPrice:      route.InputPrice,
-				OutputPrice:     route.OutputPrice,
-				CacheWritePrice: route.CacheWritePrice,
-				CacheReadPrice:  route.CacheReadPrice,
-			}
-		}
-	}
-	for providerKey, def := range cfg.ProviderDefs {
-		for modelName, meta := range def.Models {
-			slug := providerKey + "/" + modelName
-			newSlug := modelName + "(" + providerKey + ")"
-			if _, exists := pricing[slug]; exists {
-				if _, exists := pricing[newSlug]; !exists {
-					pricing[newSlug] = pricing[slug]
-				}
-				continue
-			}
-			if meta.InputPrice > 0 || meta.OutputPrice > 0 || meta.CacheWritePrice > 0 || meta.CacheReadPrice > 0 {
-				p := stats.ModelPricing{
-					InputPrice:      meta.InputPrice,
-					OutputPrice:     meta.OutputPrice,
-					CacheWritePrice: meta.CacheWritePrice,
-					CacheReadPrice:  meta.CacheReadPrice,
-				}
-				pricing[slug] = p
-				pricing[newSlug] = p
-				if _, exists := pricing[modelName]; !exists {
-					pricing[modelName] = p
-				}
-			}
-		}
-	}
-	return pricing
 }

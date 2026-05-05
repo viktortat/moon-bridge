@@ -1,6 +1,7 @@
 package deepseekv4
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -8,8 +9,9 @@ import (
 
 	"moonbridge/internal/extension/plugin"
 	"moonbridge/internal/foundation/config"
-	"moonbridge/internal/foundation/openai"
+	"moonbridge/internal/protocol/openai"
 	"moonbridge/internal/protocol/anthropic"
+	"moonbridge/internal/protocol/format"
 )
 
 const (
@@ -246,6 +248,22 @@ func (p *DSPlugin) FilterContent(_ *plugin.RequestContext, block anthropic.Conte
 	return false, nil
 }
 
+// --- Core ContentTransformer ---
+
+// FilterCoreContent is the Core format equivalent of FilterContent.
+// It filters reasoning content blocks from Core responses.
+func (p *DSPlugin) FilterCoreContent(ctx context.Context, block *format.CoreContentBlock) bool {
+	if block == nil {
+		return false
+	}
+	// In Core format, reasoning blocks have type "reasoning".
+	// These should be filtered from the visible content and handled
+	// as reasoning items by the adapter layer.
+	if block.Type == "reasoning" {
+		return true
+	}
+	return false
+}
 // --- ContentRememberer ---
 
 func (p *DSPlugin) RememberContent(ctx *plugin.RequestContext, content []anthropic.ContentBlock) {
@@ -254,6 +272,50 @@ func (p *DSPlugin) RememberContent(ctx *plugin.RequestContext, content []anthrop
 		return
 	}
 	state.RememberFromContent(content)
+}
+
+// RememberCoreContent is the Core format equivalent of RememberContent.
+// It finds reasoning content blocks and records thinking text
+// for later use by PrependThinking operations.
+func (p *DSPlugin) RememberCoreContent(ctx context.Context, content []format.CoreContentBlock) {
+	// Convert Core content blocks to anthropic ContentBlocks for internal state recording.
+	anthropicBlocks := make([]anthropic.ContentBlock, 0, len(content))
+	for _, block := range content {
+		switch block.Type {
+		case "reasoning":
+			anthropicBlocks = append(anthropicBlocks, anthropic.ContentBlock{
+				Type:      "thinking",
+				Thinking:  block.ReasoningText,
+				Signature: block.ReasoningSignature,
+			})
+		case "tool_use":
+			anthropicBlocks = append(anthropicBlocks, anthropic.ContentBlock{
+				Type: "tool_use",
+				ID:   block.ToolUseID,
+				Name: block.ToolName,
+			})
+		case "text":
+			anthropicBlocks = append(anthropicBlocks, anthropic.ContentBlock{
+				Type: "text",
+				Text: block.Text,
+			})
+		}
+	}
+
+	// Note: session-based state recording is deferred to the old path's
+	// RememberContent which the dispatch layer calls with proper session context.
+	if len(anthropicBlocks) > 0 && p.logger != nil {
+		thinkingBlocks := 0
+		for _, b := range anthropicBlocks {
+			if b.Type == "thinking" && b.Thinking != "" {
+				thinkingBlocks++
+			}
+		}
+		p.logger.Debug("RememberCoreContent: converted content blocks",
+			"total_blocks", len(anthropicBlocks),
+			"thinking_blocks", thinkingBlocks,
+		)
+	}
 }
 
 // --- StreamInterceptor ---
@@ -303,6 +365,32 @@ func (p *DSPlugin) TransformError(_ *plugin.RequestContext, msg string) string {
 		return "Missing required thinking blocks - ensure reasoning items are preserved in conversation history for tool-call turns."
 	}
 	return msg
+}
+
+// --- MutateCoreRequest (Core format equivalent of MutateRequest) ---
+
+// MutateCoreRequest injects DeepSeek thinking configuration into the CoreRequest.
+func (p *DSPlugin) MutateCoreRequest(ctx context.Context, req *format.CoreRequest) {
+	if req.Extensions == nil {
+		req.Extensions = make(map[string]any)
+	}
+
+	// Read thinking budget from extension config, default to 4096.
+	budgetTokens := 4096
+	if req.Model != "" {
+		raw := p.appCfg.ExtensionRawConfig(PluginName, req.Model)
+		if raw != nil {
+			if v, ok := raw["thinking_budget_tokens"]; ok {
+				if n, ok := v.(float64); ok {
+					budgetTokens = int(n)
+				}
+			}
+		}
+	}
+
+	req.Extensions["thinking"] = map[string]any{
+		"budget_tokens": budgetTokens,
+	}
 }
 
 // --- ReasoningExtractor ---

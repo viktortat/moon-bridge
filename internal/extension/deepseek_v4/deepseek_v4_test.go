@@ -8,7 +8,7 @@ import (
 	"testing"
 
 	pluginpkg "moonbridge/internal/extension/plugin"
-	"moonbridge/internal/foundation/openai"
+	"moonbridge/internal/protocol/openai"
 	"moonbridge/internal/protocol/anthropic"
 )
 

@@ -1,6 +1,9 @@
 package visual
 
-import "moonbridge/internal/protocol/anthropic"
+import (
+	"moonbridge/internal/protocol/anthropic"
+	"moonbridge/internal/protocol/format"
+)
 
 const (
 	ToolVisualBrief = "visual_brief"
@@ -9,6 +12,23 @@ const (
 
 func Tools() []anthropic.Tool {
 	return []anthropic.Tool{
+		{
+			Name:        ToolVisualBrief,
+			Description: "Visual Brief. Use this as the first visual pass when image understanding is needed. For attached images, pass image_refs like Image #1 or omit image fields; pass image_urls only for real HTTP(S)/data URLs. It returns a concise first-round scene/object/text/layout brief plus uncertainties and useful follow-up targets.",
+			InputSchema: visualBriefSchema(),
+		},
+		{
+			Name:        ToolVisualQA,
+			Description: "Visual QA. Use this after a Visual Brief, or for targeted follow-up questions about an image. Ask one clear visual question at a time; use image_refs for attached images, real image_urls for HTTP(S)/data URLs, or prior_visual_context from earlier visual tool results.",
+			InputSchema: visualQASchema(),
+		},
+	}
+}
+
+// CoreTools returns Core-format tool definitions for visual analysis.
+// This is the CorePluginHooks-compatible variant of Tools.
+func CoreTools() []format.CoreTool {
+	return []format.CoreTool{
 		{
 			Name:        ToolVisualBrief,
 			Description: "Visual Brief. Use this as the first visual pass when image understanding is needed. For attached images, pass image_refs like Image #1 or omit image fields; pass image_urls only for real HTTP(S)/data URLs. It returns a concise first-round scene/object/text/layout brief plus uncertainties and useful follow-up targets.",

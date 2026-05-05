@@ -62,6 +62,8 @@ type Config struct {
 	FirecrawlAPIKey   string
 	SearchMaxRounds   int
 	DefaultMaxTokens  int
+	MaxSessions int    `yaml:"max_sessions"`  // 0 = unlimited
+	SessionTTL  string `yaml:"session_ttl"`   // default "24h"
 	// Defaults holds the default configuration values.
 	Defaults Defaults
 	// Models is the canonical model definition map (shared across providers).

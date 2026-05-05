@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"moonbridge/internal/foundation/logger"
-	"moonbridge/internal/foundation/openai"
+	"moonbridge/internal/protocol/openai"
 	"moonbridge/internal/protocol/anthropic"
 
 	foundationdb "moonbridge/internal/foundation/db"

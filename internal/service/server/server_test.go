@@ -15,13 +15,10 @@ import (
 	"moonbridge/internal/extension/codex"
 	deepseekv4 "moonbridge/internal/extension/deepseek_v4"
 	"moonbridge/internal/extension/plugin"
-	"moonbridge/internal/extension/pluginhooks"
 	"moonbridge/internal/foundation/config"
 	"moonbridge/internal/foundation/logger"
-	"moonbridge/internal/foundation/openai"
+	"moonbridge/internal/protocol/openai"
 	"moonbridge/internal/protocol/anthropic"
-	"moonbridge/internal/protocol/bridge"
-	"moonbridge/internal/protocol/cache"
 	"moonbridge/internal/service/provider"
 	"moonbridge/internal/service/server"
 	"moonbridge/internal/service/stats"
@@ -123,11 +120,6 @@ func TestResponsesHandlerReturnsOpenAIResponse(t *testing.T) {
 		_ = logger.Init(logger.Config{Level: logger.LevelInfo, Format: "text", Output: os.Stderr})
 	})
 	handler := server.New(server.Config{
-		Bridge: bridge.New(config.Config{
-			DefaultMaxTokens: 1024,
-			Routes:           map[string]config.RouteEntry{"gpt-test": {Provider: "default", Model: "claude-test"}},
-			Cache:            config.CacheConfig{Mode: "off"},
-		}, cache.NewMemoryRegistry(), bridge.PluginHooks{}),
 		Provider: provider,
 	})
 
@@ -180,10 +172,6 @@ func TestResponsesHandlerCompletionMetricsUsesRawAnthropicUsage(t *testing.T) {
 	capture := &captureCompletionPlugin{}
 	sessionStats := stats.NewSessionStats()
 	handler := server.New(server.Config{
-		Bridge: bridge.New(config.Config{
-			Routes: map[string]config.RouteEntry{"gpt-test": {Provider: "default", Model: "claude-test"}},
-			Cache:  config.CacheConfig{Mode: "off"},
-		}, cache.NewMemoryRegistry(), bridge.PluginHooks{}),
 		Provider:       providerWithUsage,
 		Stats:          sessionStats,
 		PluginRegistry: registryWithCompletionCapture(t, capture),
@@ -233,10 +221,6 @@ func TestStreamingCompletionMetricsMergesRawAnthropicDeltaUsage(t *testing.T) {
 	capture := &captureCompletionPlugin{}
 	sessionStats := stats.NewSessionStats()
 	handler := server.New(server.Config{
-		Bridge: bridge.New(config.Config{
-			Routes: map[string]config.RouteEntry{"gpt-test": {Provider: "default", Model: "claude-test"}},
-			Cache:  config.CacheConfig{Mode: "off"},
-		}, cache.NewMemoryRegistry(), bridge.PluginHooks{}),
 		Provider:       provider,
 		Stats:          sessionStats,
 		PluginRegistry: registryWithCompletionCapture(t, capture),
@@ -285,10 +269,6 @@ func TestStreamingCompletionMetricsKeepsStartFreshInputForCacheOnlyDelta(t *test
 	capture := &captureCompletionPlugin{}
 	sessionStats := stats.NewSessionStats()
 	handler := server.New(server.Config{
-		Bridge: bridge.New(config.Config{
-			Routes: map[string]config.RouteEntry{"gpt-test": {Provider: "default", Model: "claude-test"}},
-			Cache:  config.CacheConfig{Mode: "off"},
-		}, cache.NewMemoryRegistry(), bridge.PluginHooks{}),
 		Provider:       provider,
 		Stats:          sessionStats,
 		PluginRegistry: registryWithCompletionCapture(t, capture),
@@ -318,11 +298,6 @@ func TestResponsesHandlerWritesTraceFile(t *testing.T) {
 	traceRoot := t.TempDir()
 	provider := &fakeProvider{}
 	handler := server.New(server.Config{
-		Bridge: bridge.New(config.Config{
-			DefaultMaxTokens: 1024,
-			Routes:           map[string]config.RouteEntry{"gpt-test": {Provider: "default", Model: "claude-test"}},
-			Cache:            config.CacheConfig{Mode: "off"},
-		}, cache.NewMemoryRegistry(), bridge.PluginHooks{}),
 		Provider: provider,
 		Tracer:   mbtrace.New(mbtrace.Config{Enabled: true, Root: traceRoot, SessionID: "session-test"}),
 	})
@@ -390,11 +365,6 @@ func TestResponsesHandlerWritesTraceFile(t *testing.T) {
 func TestResponsesHandlerAcceptsCodexResponsesPath(t *testing.T) {
 	provider := &fakeProvider{}
 	handler := server.New(server.Config{
-		Bridge: bridge.New(config.Config{
-			DefaultMaxTokens: 1024,
-			Routes:           map[string]config.RouteEntry{"gpt-test": {Provider: "default", Model: "claude-test"}},
-			Cache:            config.CacheConfig{Mode: "off"},
-		}, cache.NewMemoryRegistry(), bridge.PluginHooks{}),
 		Provider: provider,
 	})
 
@@ -488,11 +458,6 @@ func TestBuildModelInfoPreservesReasoningLevelsForDeepSeekV4(t *testing.T) {
 
 func TestResponsesHandlerRejectsUnsupportedToolType(t *testing.T) {
 	handler := server.New(server.Config{
-		Bridge: bridge.New(config.Config{
-			DefaultMaxTokens: 1024,
-			Routes:           map[string]config.RouteEntry{"gpt-test": {Provider: "default", Model: "claude-test"}},
-			Cache:            config.CacheConfig{Mode: "off"},
-		}, cache.NewMemoryRegistry(), bridge.PluginHooks{}),
 		Provider: &fakeProvider{},
 	})
 
@@ -522,11 +487,6 @@ func TestResponsesHandlerStreamsOpenAIEvents(t *testing.T) {
 		},
 	}
 	handler := server.New(server.Config{
-		Bridge: bridge.New(config.Config{
-			DefaultMaxTokens: 1024,
-			Routes:           map[string]config.RouteEntry{"gpt-test": {Provider: "default", Model: "claude-test"}},
-			Cache:            config.CacheConfig{Mode: "off"},
-		}, cache.NewMemoryRegistry(), bridge.PluginHooks{}),
 		Provider: provider,
 	})
 
@@ -583,7 +543,6 @@ func TestResponsesHandlerReusesCodexSessionForDeepSeekThinking(t *testing.T) {
 		t.Fatalf("InitAll() error = %v", err)
 	}
 	handler := server.New(server.Config{
-		Bridge:   bridge.New(cfg, cache.NewMemoryRegistry(), pluginhooks.PluginHooksFromRegistry(plugins)),
 		Provider: provider,
 	})
 
@@ -685,12 +644,6 @@ func TestResponsesHandlerPassesOpenAIProtocolThroughWithUpstreamModel(t *testing
 	sessionStats.Record("image", "", stats.Usage{InputTokens: 1_000_000})
 	capture := &captureCompletionPlugin{}
 	handler := server.New(server.Config{
-		Bridge: bridge.New(config.Config{
-			Routes: map[string]config.RouteEntry{
-				"image": {Provider: "openai", Model: "gpt-image-1.5"},
-			},
-			Cache: config.CacheConfig{Mode: "off"},
-		}, cache.NewMemoryRegistry(), bridge.PluginHooks{}),
 		ProviderMgr:      providerMgr,
 		OpenAIHTTPClient: httpClient,
 		Stats:            sessionStats,
@@ -774,12 +727,6 @@ func TestResponsesHandlerPassesOpenAIStreamUsageToMetrics(t *testing.T) {
 	}
 	capture := &captureCompletionPlugin{}
 	handler := server.New(server.Config{
-		Bridge: bridge.New(config.Config{
-			Routes: map[string]config.RouteEntry{
-				"gpt-direct": {Provider: "openai", Model: "gpt-upstream"},
-			},
-			Cache: config.CacheConfig{Mode: "off"},
-		}, cache.NewMemoryRegistry(), bridge.PluginHooks{}),
 		ProviderMgr:      providerMgr,
 		OpenAIHTTPClient: httpClient,
 		PluginRegistry:   registryWithCompletionCapture(t, capture),
@@ -831,12 +778,6 @@ func TestOpenAIResponsePassthroughWritesTraceOnSuccess(t *testing.T) {
 	}
 
 	handler := server.New(server.Config{
-		Bridge: bridge.New(config.Config{
-			Routes: map[string]config.RouteEntry{
-				"gpt-direct": {Provider: "openai", Model: "gpt-upstream"},
-			},
-			Cache: config.CacheConfig{Mode: "off"},
-		}, cache.NewMemoryRegistry(), bridge.PluginHooks{}),
 		ProviderMgr:      providerMgr,
 		OpenAIHTTPClient: httpClient,
 		Tracer:           mbtrace.New(mbtrace.Config{Enabled: true, Root: traceRoot, SessionID: "session-test"}),
@@ -940,12 +881,6 @@ func TestOpenAIResponsePassthroughInjectsWebSearchOnEnabledModel(t *testing.T) {
 	providerMgr.SetResolvedWebSearch("openai", "enabled")
 
 	handler := server.New(server.Config{
-		Bridge: bridge.New(config.Config{
-			Routes: map[string]config.RouteEntry{
-				"gpt-direct": {Provider: "openai", Model: "gpt-upstream"},
-			},
-			Cache: config.CacheConfig{Mode: "off"},
-		}, cache.NewMemoryRegistry(), bridge.PluginHooks{}),
 		ProviderMgr:      providerMgr,
 		OpenAIHTTPClient: httpClient,
 		Tracer:           mbtrace.New(mbtrace.Config{Enabled: true, Root: traceRoot, SessionID: "session-test"}),
@@ -1012,12 +947,6 @@ func TestOpenAIResponsePassthroughSkipsWebSearchOnDisabledModel(t *testing.T) {
 	providerMgr.SetResolvedWebSearch("openai", "disabled")
 
 	handler := server.New(server.Config{
-		Bridge: bridge.New(config.Config{
-			Routes: map[string]config.RouteEntry{
-				"gpt-direct": {Provider: "openai", Model: "gpt-upstream"},
-			},
-			Cache: config.CacheConfig{Mode: "off"},
-		}, cache.NewMemoryRegistry(), bridge.PluginHooks{}),
 		ProviderMgr:      providerMgr,
 		OpenAIHTTPClient: httpClient,
 	})
@@ -1073,12 +1002,6 @@ func TestOpenAIResponsePassthroughDoesNotDuplicateWebSearch(t *testing.T) {
 	providerMgr.SetResolvedWebSearch("openai", "enabled")
 
 	handler := server.New(server.Config{
-		Bridge: bridge.New(config.Config{
-			Routes: map[string]config.RouteEntry{
-				"gpt-direct": {Provider: "openai", Model: "gpt-upstream"},
-			},
-			Cache: config.CacheConfig{Mode: "off"},
-		}, cache.NewMemoryRegistry(), bridge.PluginHooks{}),
 		ProviderMgr:      providerMgr,
 		OpenAIHTTPClient: httpClient,
 	})
@@ -1107,11 +1030,6 @@ func TestOpenAIResponsePassthroughDoesNotDuplicateWebSearch(t *testing.T) {
 
 func TestAuthWithNoTokenConfiguredPassesAllRequests(t *testing.T) {
 	handler := server.New(server.Config{
-		Bridge: bridge.New(config.Config{
-			Cache:            config.CacheConfig{Mode: "off"},
-			DefaultMaxTokens: 1024,
-			Routes:           map[string]config.RouteEntry{"gpt-test": {Provider: "default", Model: "claude-test"}},
-		}, cache.NewMemoryRegistry(), bridge.PluginHooks{}),
 		Provider: &fakeProvider{},
 	})
 
@@ -1132,9 +1050,6 @@ func TestAuthWithNoTokenConfiguredPassesAllRequests(t *testing.T) {
 
 func TestAuthRejectsRequestsWithoutValidToken(t *testing.T) {
 	handler := server.New(server.Config{
-		Bridge: bridge.New(config.Config{
-			Cache: config.CacheConfig{Mode: "off"},
-		}, cache.NewMemoryRegistry(), bridge.PluginHooks{}),
 		Provider:  &fakeProvider{},
 		AppConfig: config.Config{AuthToken: "my-secret"},
 	})
@@ -1168,11 +1083,6 @@ func TestAuthAcceptsValidBearerToken(t *testing.T) {
 			Routes:           map[string]config.RouteEntry{"gpt-test": {Provider: "default", Model: "claude-test"}},
 			Cache:            config.CacheConfig{Mode: "off"},
 		},
-		Bridge: bridge.New(config.Config{
-			DefaultMaxTokens: 1024,
-			Routes:           map[string]config.RouteEntry{"gpt-test": {Provider: "default", Model: "claude-test"}},
-			Cache:            config.CacheConfig{Mode: "off"},
-		}, cache.NewMemoryRegistry(), bridge.PluginHooks{}),
 		Provider: &fakeProvider{},
 	})
 

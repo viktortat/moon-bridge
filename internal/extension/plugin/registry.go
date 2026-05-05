@@ -8,7 +8,7 @@ import (
 
 	"moonbridge/internal/foundation/config"
 	"moonbridge/internal/foundation/logger"
-	"moonbridge/internal/foundation/openai"
+	"moonbridge/internal/protocol/openai"
 	"moonbridge/internal/protocol/anthropic"
 )
 

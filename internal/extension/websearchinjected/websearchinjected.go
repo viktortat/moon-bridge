@@ -10,6 +10,7 @@ package websearchinjected
 
 import (
 	"moonbridge/internal/extension/websearch"
+	"moonbridge/internal/protocol/format"
 	"moonbridge/internal/protocol/anthropic"
 )
 
@@ -24,6 +25,21 @@ func IsEnabled(cfg interface{ WebSearchInjected() bool }) bool {
 // Delegates to websearch.InjectedTools for the actual tool definitions.
 func InjectTools(firecrawlKey string) []anthropic.Tool {
 	return websearch.InjectedTools(firecrawlKey)
+}
+
+// CoreTools returns Core-format tool definitions for injected web search.
+// This is the CorePluginHooks-compatible variant of InjectTools.
+func CoreTools(firecrawlKey string) []format.CoreTool {
+	tools := websearch.InjectedTools(firecrawlKey)
+	coreTools := make([]format.CoreTool, len(tools))
+	for i, t := range tools {
+		coreTools[i] = format.CoreTool{
+			Name:        t.Name,
+			Description: t.Description,
+			InputSchema: t.InputSchema,
+		}
+	}
+	return coreTools
 }
 
 // WrapProvider wraps an Anthropic client with the injected search orchestrator.

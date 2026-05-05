@@ -8,14 +8,11 @@ import (
 
 	"moonbridge/internal/service/app"
 
-	"moonbridge/internal/extension/pluginhooks"
 	"moonbridge/internal/foundation/config"
 	"moonbridge/internal/foundation/db"
 	"log/slog"
 	"moonbridge/internal/foundation/logger"
 	"moonbridge/internal/protocol/anthropic"
-	"moonbridge/internal/protocol/bridge"
-	"moonbridge/internal/protocol/cache"
 	"moonbridge/internal/service/provider"
 	"moonbridge/internal/service/server"
 	"moonbridge/internal/service/stats"
@@ -117,7 +114,6 @@ func main() {
 	defer dbRegistry.Shutdown()
 
 	handler := server.New(server.Config{
-		Bridge:         bridge.New(cfg, cache.NewMemoryRegistry(), pluginhooks.PluginHooksFromRegistry(plugins)),
 		Provider:       defaultClient,
 		ProviderMgr:    providerMgr,
 		Stats:          sessionStats,

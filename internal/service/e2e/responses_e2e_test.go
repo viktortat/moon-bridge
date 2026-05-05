@@ -18,8 +18,6 @@ import (
 	"time"
 
 	"moonbridge/internal/foundation/config"
-	"moonbridge/internal/protocol/bridge"
-	"moonbridge/internal/protocol/cache"
 	"moonbridge/internal/service/provider"
 	"moonbridge/internal/service/server"
 )
@@ -141,7 +139,6 @@ func newE2EHandlerWithCache(t *testing.T, cfg config.Config, cacheConfig config.
 	}
 
 	return server.New(server.Config{
-		Bridge:      bridge.New(cfg, cache.NewMemoryRegistry(), bridge.PluginHooks{}),
 		ProviderMgr: providerMgr,
 		AppConfig:   cfg,
 	})

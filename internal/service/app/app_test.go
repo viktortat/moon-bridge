@@ -326,7 +326,7 @@ func TestBuildProviderDefsFromConfigKeepsMultiProviderDefinitions(t *testing.T) 
 		},
 	}
 
-	defs := buildProviderDefsFromConfig(cfg)
+	defs := provider.BuildProviderDefsFromConfig(cfg)
 	if len(defs) != 2 {
 		t.Fatalf("defs = %+v", defs)
 	}

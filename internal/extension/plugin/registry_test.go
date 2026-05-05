@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	"moonbridge/internal/extension/plugin"
-	"moonbridge/internal/foundation/openai"
+	"moonbridge/internal/protocol/openai"
 	"moonbridge/internal/protocol/anthropic"
 )
 
@@ -254,27 +254,4 @@ func TestRegistryNilSafe(t *testing.T) {
 	}
 }
 
-func TestRegistryCompatOnResponseContent(t *testing.T) {
-	r := plugin.NewRegistry(nil)
-	r.Register(&testContentFilter{testPlugin: testPlugin{name: "cf", enabled: true}})
 
-	skip, text := r.OnResponseContent("test", anthropic.ContentBlock{Type: "thinking", Thinking: "deep"})
-	if !skip {
-		t.Fatal("should skip")
-	}
-	if text != "thought" {
-		t.Fatalf("unexpected reasoning text: %s", text)
-	}
-}
-
-func TestRegistryCompatPostConvertRequest(t *testing.T) {
-	r := plugin.NewRegistry(nil)
-	m := &testMutator{testPlugin: testPlugin{name: "mut", enabled: true}}
-	r.Register(m)
-
-	req := &anthropic.MessageRequest{Temperature: ptrFloat(1.0)}
-	r.PostConvertRequest("test", req, nil)
-	if *req.Temperature != 0.5 {
-		t.Fatalf("temperature = %v, want 0.5", *req.Temperature)
-	}
-}

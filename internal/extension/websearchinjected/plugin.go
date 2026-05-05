@@ -3,6 +3,7 @@ package websearchinjected
 import (
 	"moonbridge/internal/extension/plugin"
 	"moonbridge/internal/extension/websearch"
+	"moonbridge/internal/protocol/format"
 	"moonbridge/internal/protocol/anthropic"
 )
 
@@ -28,6 +29,11 @@ func (p *WSInjectedPlugin) EnabledForModel(model string) bool { return p.isEnabl
 
 func (p *WSInjectedPlugin) InjectTools(ctx *plugin.RequestContext) []anthropic.Tool {
 	return InjectTools(ctx.WebSearch.FirecrawlKey)
+}
+
+// CoreInjectTools returns Core-format tool definitions for this request.
+func (p *WSInjectedPlugin) CoreInjectTools(ctx *plugin.RequestContext) []format.CoreTool {
+	return CoreTools(ctx.WebSearch.FirecrawlKey)
 }
 
 // --- ProviderWrapper ---
