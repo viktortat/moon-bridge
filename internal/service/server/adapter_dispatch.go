@@ -151,6 +151,11 @@ func (s *Server) handleWithAdapters(
 		return
 	}
 
+	// Inject web_search tool if enabled for this model.
+	if s.providerMgr.ResolvedWebSearchForModel(openAIReq.Model) == "enabled" {
+		injectAnthropicWebSearch(upstreamReq)
+	}
+
 	// ------------------------------------------------------------------
 	// 4b. If streaming, use streaming path.
 	// ------------------------------------------------------------------
@@ -444,4 +449,23 @@ func (m *adapterCacheManager) UpdateRegistry(ctx context.Context, key, ttl strin
 		PrefixKey: key,
 		TTL:       ttl,
 	}, signals, usage.InputTokens)
+}
+
+// injectAnthropicWebSearch adds the Anthropic web_search_20250305 server tool
+// to an anthropic.MessageRequest if not already present.
+func injectAnthropicWebSearch(req *anthropic.MessageRequest) {
+	for _, t := range req.Tools {
+		if t.Name == "web_search" {
+			return // already present
+		}
+	}
+	maxUses := 8
+	if req.Tools == nil {
+		req.Tools = make([]anthropic.Tool, 0, 1)
+	}
+	req.Tools = append(req.Tools, anthropic.Tool{
+		Name:    "web_search",
+		Type:    "web_search_20250305",
+		MaxUses: maxUses,
+	})
 }
