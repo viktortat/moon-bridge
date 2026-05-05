@@ -341,6 +341,9 @@ func (s *Server) handleAdapterStream(
 ) {
 	log := slog.Default().With("model", openAIReq.Model, "path", "adapter_stream")
 
+	// Track when the request started for latency measurement.
+	requestStart := time.Now()
+
 	// Get or create session for this request.
 	sess := s.sessionForRequest(r)
 	_ = sess
@@ -485,10 +488,13 @@ func (s *Server) handleAdapterStream(
 
 	// Track usage from the final response.completed event.
 	var finalUsage openai.Usage
+	var finalResp *openai.Response
 	for ev := range streamChan {
 		if ev.Event == "response.completed" {
 			if lf, ok := ev.Data.(openai.ResponseLifecycleEvent); ok {
 				finalUsage = lf.Response.Usage
+				lfResp := lf.Response
+				finalResp = &lfResp
 			}
 		}
 		writeSSE(w, ev)
@@ -502,6 +508,25 @@ func (s *Server) handleAdapterStream(
 			CacheCreationInputTokens: finalUsage.InputTokensDetails.CachedTokens,
 			CacheReadInputTokens:     0,
 		})
+	}
+
+	// Update trace record with the final response data.
+	if finalResp != nil {
+		streamRecord.OpenAIResponse = finalResp
+	}
+
+	// Notify plugin hooks for metrics tracking.
+	if s.pluginRegistry != nil && finalResp != nil {
+		usage := zeroUsage(string(config.ProtocolAnthropic), "anthropic_stream")
+		if finalUsage.InputTokens > 0 || finalUsage.OutputTokens > 0 {
+			usage = usageFromAnthropic(string(config.ProtocolAnthropic), "core_stream", anthropic.Usage{
+				InputTokens:              finalUsage.InputTokens,
+				OutputTokens:             finalUsage.OutputTokens,
+				CacheCreationInputTokens: 0,
+				CacheReadInputTokens:     finalUsage.InputTokensDetails.CachedTokens,
+			}, false)
+		}
+		s.onRequestCompleted(openAIReq.Model, candidate.UpstreamModel, requestStart, usage, 0, "success", "")
 	}
 }
 
