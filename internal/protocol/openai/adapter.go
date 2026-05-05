@@ -1066,9 +1066,52 @@ func convertTool(tool Tool) format.CoreTool {
 		return format.CoreTool{
 			Name:        tool.Name,
 			Description: tool.Description,
-			InputSchema: tool.Parameters,
+			InputSchema: adaptSchema(tool.Parameters, tool.Name),
 			Extensions:  ext,
 		}
+	}
+}
+
+// adaptSchema ensures custom Codex CLI tools have a proper input schema,
+// since models like DeepSeek/Claude don't natively understand the Codex
+// custom tool format (type: "custom").
+func adaptSchema(params map[string]any, toolName string) map[string]any {
+	if params != nil && len(params) > 0 {
+		// Has existing schema, just clean it
+		return params
+	}
+	// Generate schemas for known Codex custom tools
+	switch toolName {
+	case "apply_patch", "patch":
+		return map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"input": map[string]any{"type": "string", "description": "The patch content or operation to apply"},
+			},
+			"required": []string{"input"},
+		}
+	case "exec", "exec_command", "local_shell", "shell":
+		return map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"command": map[string]any{
+					"type": "array", "items": map[string]any{"type": "string"},
+					"description": "Command and arguments to execute",
+				},
+				"description": map[string]any{"type": "string"},
+			},
+			"required": []string{"command"},
+		}
+	case "read", "view", "view_image":
+		return map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"file_path": map[string]any{"type": "string"},
+			},
+			"required": []string{"file_path"},
+		}
+	default:
+		return map[string]any{"type": "object"}
 	}
 }
 
