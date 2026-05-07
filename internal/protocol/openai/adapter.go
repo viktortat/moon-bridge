@@ -548,6 +548,11 @@ func (a *OpenAIAdapter) streamLoop(ctx context.Context, coreReq *format.CoreRequ
 
 			outIdx := outputIndexes[index]
 
+			// Store accumulated text in response output for final completed event.
+			if outIdx < len(response.Output) && len(response.Output[outIdx].Content) > 0 {
+				response.Output[outIdx].Content[0].Text = text
+			}
+
 			send(StreamEvent{
 				Event: "response.output_text.done",
 				Data: OutputTextDoneEvent{
