@@ -8,7 +8,7 @@ import (
 
 // estimateTokens estimates the token count for an Anthropic MessageRequest.
 // Used by the cache planner to decide whether caching is worthwhile.
-func estimateTokens(request any) int {
+func EstimateTokens(request any) int {
 	data, _ := json.Marshal(request)
 	n := len(data)
 	if n == 0 {
@@ -21,7 +21,7 @@ func estimateTokens(request any) int {
 }
 
 // estimatePartTokens estimates token count for any JSON-serializable slice.
-func estimatePartTokens(part any) int {
+func EstimatePartTokens(part any) int {
 	data, _ := json.Marshal(part)
 	n := len(data)
 	if n == 0 {

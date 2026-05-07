@@ -182,13 +182,26 @@ func runTransform(ctx context.Context, cfg config.Config, errors io.Writer) erro
 	_ = adapterReg.RegisterClientStream(oaiAdapter)
 
 	// Upstream: Anthropic provider adapter with cache manager.
-	cacheMgr := server.NewAdapterCacheManager(cfg.Cache, cacheReg)
+	cacheMgr := anthropic.NewCacheManager(&cfg.Cache, cacheReg)
 	anthAdapter := anthropic.NewAnthropicProviderAdapter(cfg, cacheMgr, coreHooks)
 	_ = adapterReg.RegisterProvider(anthAdapter)
 	_ = adapterReg.RegisterProviderStream(anthAdapter)
 
 	// Upstream: Google GenAI provider adapter.
-	googleAdapter := google.NewGeminiProviderAdapter(cfg, nil, coreHooks)
+	googleCfg := &cache.PlanCacheConfig{
+		Mode:                     cfg.Cache.Mode,
+		TTL:                      cfg.Cache.TTL,
+		PromptCaching:            cfg.Cache.PromptCaching,
+		AutomaticPromptCache:     cfg.Cache.AutomaticPromptCache,
+		ExplicitCacheBreakpoints: cfg.Cache.ExplicitCacheBreakpoints,
+		AllowRetentionDowngrade:  cfg.Cache.AllowRetentionDowngrade,
+		MaxBreakpoints:           cfg.Cache.MaxBreakpoints,
+		MinCacheTokens:           cfg.Cache.MinCacheTokens,
+		ExpectedReuse:            cfg.Cache.ExpectedReuse,
+		MinimumValueScore:        cfg.Cache.MinimumValueScore,
+		MinBreakpointTokens:      cfg.Cache.MinBreakpointTokens,
+	}
+	googleAdapter := google.NewGeminiProviderAdapter(cfg, nil, coreHooks, googleCfg, cacheReg)
 	_ = adapterReg.RegisterProvider(googleAdapter)
 	_ = adapterReg.RegisterProviderStream(googleAdapter)
 

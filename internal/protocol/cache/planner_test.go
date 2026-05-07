@@ -6,7 +6,7 @@ import (
 )
 
 func TestCanonicalHashIsStableAcrossMapOrder(t *testing.T) {
-	first, err := canonicalHash(map[string]any{
+	first, err := CanonicalHash(map[string]any{
 		"b": 2,
 		"a": map[string]any{"z": true, "c": "ok"},
 	})
@@ -14,7 +14,7 @@ func TestCanonicalHashIsStableAcrossMapOrder(t *testing.T) {
 		t.Fatalf("CanonicalHash(first) error = %v", err)
 	}
 
-	second, err := canonicalHash(map[string]any{
+	second, err := CanonicalHash(map[string]any{
 		"a": map[string]any{"c": "ok", "z": true},
 		"b": 2,
 	})

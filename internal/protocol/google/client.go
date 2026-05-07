@@ -146,6 +146,103 @@ func (c *Client) StreamGenerateContent(ctx context.Context, model string, req *G
 // to close (connections are managed by http.Client), so this is a no-op.
 func (c *Client) Close() error { return nil }
 
+
+// ============================================================================
+// CachedContent API methods
+// ============================================================================
+
+// CreateCachedContent creates a new CachedContent resource.
+func (c *Client) CreateCachedContent(ctx context.Context, cc *CachedContent) (*CachedContent, error) {
+	data, _ := json.Marshal(cc)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		c.baseURL+"/v1beta/cachedContents", bytes.NewReader(data))
+	if err != nil {
+		return nil, fmt.Errorf("create cached content: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-goog-api-key", c.apiKey)
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("create cached content: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("create cached content: %s", resp.Status)
+	}
+	var result CachedContent
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("create cached content decode: %w", err)
+	}
+	return &result, nil
+}
+
+// GetCachedContent retrieves a CachedContent resource by name.
+func (c *Client) GetCachedContent(ctx context.Context, name string) (*CachedContent, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		c.baseURL+"/v1beta/"+name, nil)
+	if err != nil {
+		return nil, fmt.Errorf("get cached content: %w", err)
+	}
+	req.Header.Set("x-goog-api-key", c.apiKey)
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("get cached content: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("get cached content: %s", resp.Status)
+	}
+	var result CachedContent
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("get cached content decode: %w", err)
+	}
+	return &result, nil
+}
+
+// UpdateCachedContent updates the TTL of a CachedContent resource.
+func (c *Client) UpdateCachedContent(ctx context.Context, name, ttl string) (*CachedContent, error) {
+	reqBody := UpdateCachedContentRequest{TTL: ttl}
+	data, _ := json.Marshal(reqBody)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPatch,
+		c.baseURL+"/v1beta/"+name, bytes.NewReader(data))
+	if err != nil {
+		return nil, fmt.Errorf("update cached content: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-goog-api-key", c.apiKey)
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("update cached content: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("update cached content: %s", resp.Status)
+	}
+	var result CachedContent
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("update cached content decode: %w", err)
+	}
+	return &result, nil
+}
+
+// DeleteCachedContent deletes a CachedContent resource.
+func (c *Client) DeleteCachedContent(ctx context.Context, name string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete,
+		c.baseURL+"/v1beta/"+name, nil)
+	if err != nil {
+		return fmt.Errorf("delete cached content: %w", err)
+	}
+	req.Header.Set("x-goog-api-key", c.apiKey)
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("delete cached content: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
+		return fmt.Errorf("delete cached content: %s", resp.Status)
+	}
+	return nil
+}
 // ============================================================================
 // Internal helpers
 // ============================================================================

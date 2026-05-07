@@ -34,7 +34,7 @@ func newTestClient(t *testing.T, srv *httptest.Server) *google.Client {
 
 // newTestAdapter creates a GeminiProviderAdapter with nil client and no hooks.
 func newTestAdapter() *google.GeminiProviderAdapter {
-	return google.NewGeminiProviderAdapter(config.Config{}, nil, format.CorePluginHooks{})
+	return google.NewGeminiProviderAdapter(config.Config{}, nil, format.CorePluginHooks{}, nil, nil)
 }
 
 // ============================================================================
@@ -1511,7 +1511,7 @@ func TestFromCoreRequest_PluginHooksCalled(t *testing.T) {
 			req.Model = "mutated-model"
 		},
 	}
-	adapter := google.NewGeminiProviderAdapter(config.Config{}, nil, hooks)
+	adapter := google.NewGeminiProviderAdapter(config.Config{}, nil, hooks, nil, nil)
 
 	coreReq := &format.CoreRequest{
 		Model: "gemini-2.0-flash",
@@ -1634,6 +1634,8 @@ func TestFromCoreRequest_DefaultMaxTokens(t *testing.T) {
 		config.Config{DefaultMaxTokens: 8192},
 		nil,
 		format.CorePluginHooks{},
+		nil,
+		nil,
 	)
 	coreReq := &format.CoreRequest{
 		Model: "test",

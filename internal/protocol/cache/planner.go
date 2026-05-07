@@ -411,7 +411,7 @@ func evenlySpacedMessageBreakpoints(candidates []MessageBreakpointCandidate, lim
 	return selected
 }
 
-func canonicalHash(value any) (string, error) {
+func CanonicalHash(value any) (string, error) {
 	data, err := json.Marshal(value)
 	if err != nil {
 		return "", err

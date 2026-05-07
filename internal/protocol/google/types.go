@@ -16,6 +16,10 @@ type GenerateContentRequest struct {
 	GenerationConfig *GenerationConfig    `json:"generation_config,omitempty"`
 	Tools            []Tool               `json:"tools,omitempty"`
 	ToolConfig       json.RawMessage      `json:"tool_config,omitempty"`
+	// CachedContent references a CachedContent resource for prompt caching.
+	// When set, system_instruction, tools, and tool_config must not be set
+	// (Gemini API constraint — they become part of the cached content).
+	CachedContent string `json:"cached_content,omitempty"`
 }
 
 // Content represents a single message content in Gemini's format.
@@ -129,4 +133,38 @@ type UsageMetadata struct {
 	// CachedContentTokenCount is the number of tokens served from context cache.
 	// Maps to CoreUsage.CachedInputTokens.
 	CachedContentTokenCount int `json:"cached_content_token_count,omitempty"`
+}
+
+// ============================================================================
+// CachedContent DTOs
+// ============================================================================
+
+// CachedContentUsageMetadata contains token count info for a CachedContent resource.
+type CachedContentUsageMetadata struct {
+	TotalTokenCount int `json:"totalToken_count"`
+}
+
+// CachedContent represents a Google Gemini CachedContent resource.
+type CachedContent struct {
+	Name              string                      `json:"name,omitempty"`
+	Model             string                      `json:"model"`
+	DisplayName       string                      `json:"display_name,omitempty"`
+	Contents          []Content                   `json:"contents"`
+	SystemInstruction *Content                    `json:"system_instruction,omitempty"`
+	Tools             []Tool                      `json:"tools,omitempty"`
+	ToolConfig        json.RawMessage             `json:"tool_config,omitempty"`
+	TTL               string                      `json:"ttl,omitempty"`
+	ExpireTime        string                      `json:"expire_time,omitempty"`
+	CreateTime        string                      `json:"create_time,omitempty"`
+	UpdateTime        string                      `json:"update_time,omitempty"`
+	UsageMetadata     *CachedContentUsageMetadata `json:"usage_metadata,omitempty"`
+}
+
+// CreateCachedContentRequest is the request body for POST /cachedContents.
+type CreateCachedContentRequest CachedContent
+
+// UpdateCachedContentRequest is the request body for PATCH /cachedContents/{name}.
+type UpdateCachedContentRequest struct {
+	TTL string `json:"ttl"`
+	ExpireTime string `json:"expire_time,omitempty"`
 }

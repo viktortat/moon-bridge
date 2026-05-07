@@ -12,6 +12,7 @@ import (
 
 	"moonbridge/internal/foundation/config"
 	"moonbridge/internal/protocol/format"
+	"moonbridge/internal/protocol/cache"
 )
 
 // ============================================================================
@@ -28,6 +29,13 @@ type GeminiProviderAdapter struct {
 	client *Client
 	hooks format.CorePluginHooks
 
+	// Cache config and registry (nil = caching disabled).
+	cacheCfg *cache.PlanCacheConfig
+	registry *cache.MemoryRegistry
+	// currentCacheKey tracks the cache key for the current request.
+	currentCacheKey string
+
+
 	streamMu      sync.Mutex
 	streamEvents  []GenerateContentResponse
 	prevSnapshots map[int]string // candidate index → previous text for delta computation
@@ -37,13 +45,16 @@ type GeminiProviderAdapter struct {
 //
 // client is the HTTP client for Gemini API calls. May be nil if the adapter
 // is registered for type conversion only (dispatch layer manages the client).
-func NewGeminiProviderAdapter(cfg config.Config, client *Client, hooks format.CorePluginHooks) *GeminiProviderAdapter {
+func NewGeminiProviderAdapter(cfg config.Config, client *Client, hooks format.CorePluginHooks, cacheCfg *cache.PlanCacheConfig, registry *cache.MemoryRegistry) *GeminiProviderAdapter {
 	return &GeminiProviderAdapter{
-		cfg:           cfg,
-		client:        client,
-		hooks:         hooks.WithDefaults(),
+		cfg:       cfg,
+		client:    client,
+		hooks:     hooks.WithDefaults(),
+		cacheCfg:  cacheCfg,
+		registry:  registry,
 		prevSnapshots: make(map[int]string),
 	}
+
 }
 
 // ProviderProtocol returns "google-genai".
@@ -113,6 +124,9 @@ func (a *GeminiProviderAdapter) FromCoreRequest(ctx context.Context, req *format
 		}
 	}
 
+	// Cache integration — look up or create CachedContent.
+	a.prepareCache(ctx, geminiReq)
+
 	return geminiReq, nil
 }
 
@@ -169,6 +183,10 @@ func (a *GeminiProviderAdapter) ToCoreResponse(ctx context.Context, resp any) (*
 			CachedInputTokens: geminiResp.UsageMetadata.CachedContentTokenCount,
 		}
 	}
+
+	// Update cache registry from response metadata.
+	a.prepareCacheResponse(geminiResp, a.currentCacheKey)
+	a.currentCacheKey = ""
 
 	return coreResp, nil
 }

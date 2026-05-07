@@ -128,6 +128,8 @@ type ProviderDef struct {
 	Project    string `yaml:"project,omitempty"`
 	Location   string `yaml:"location,omitempty"`
 	APIVersion string `yaml:"api_version,omitempty"`
+	// Cache config for this provider. If nil, provider does not use caching.
+	Cache *CacheConfig `yaml:"cache,omitempty"`
 	WebSearchSupport WebSearchSupport
 	WebSearchMaxUses int
 	TavilyAPIKey     string
@@ -345,6 +347,12 @@ func (cfg Config) validateSearchConfig() error {
 			}
 			if maxRounds <= 0 {
 				return fmt.Errorf("providers.%s.web_search.search_max_rounds must be > 0 when web_search.support is 'injected'", key)
+			}
+		}
+		// Validate per-provider cache config.
+		if def.Cache != nil {
+			if err := def.Cache.Validate(); err != nil {
+				return fmt.Errorf("providers.%s.cache: %w", key, err)
 			}
 		}
 	}
