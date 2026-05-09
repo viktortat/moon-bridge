@@ -162,6 +162,9 @@ func (s *Server) handleWithAdapters(
 	// 4. Convert CoreRequest → upstream request (anthropic.MessageRequest).
 	//    Cache planning/injection happens inside FromCoreRequest.
 	// ------------------------------------------------------------------
+	// Override CoreRequest model alias with upstream model name so
+	// the upstream provider receives the correct model identifier.
+	coreReq.Model = preferred.UpstreamModel
 	upstreamAny, err := providerAdapter.FromCoreRequest(ctx, coreReq)
 	if err != nil {
 		log.Error("adapter path: FromCoreRequest failed", "error", err)
