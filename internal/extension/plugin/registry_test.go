@@ -247,3 +247,40 @@ func TestRegistryNilSafe(t *testing.T) {
 		t.Fatal("nil registry should not have enabled plugins")
 	}
 }
+type onStreamCompleteRecorder struct {
+	testPlugin
+	called bool
+}
+
+func (r *onStreamCompleteRecorder) NewStreamState() any {
+	return nil
+}
+
+func (r *onStreamCompleteRecorder) OnStreamEvent(_ *plugin.StreamContext, _ plugin.StreamEvent) (bool, []openai.StreamEvent) {
+	return false, nil
+}
+
+func (r *onStreamCompleteRecorder) OnStreamComplete(_ *plugin.StreamContext, _ string) {
+	r.called = true
+}
+
+func TestRegistryOnStreamCompleteDispatch(t *testing.T) {
+	r := plugin.NewRegistry(nil)
+	rec := &onStreamCompleteRecorder{testPlugin: testPlugin{name: "sc", enabled: true}}
+	r.Register(rec)
+
+	states := r.NewStreamStates("model")
+	r.OnStreamComplete("model", states, "hello", nil)
+	if !rec.called {
+		t.Fatal("OnStreamComplete not called for enabled plugin")
+	}
+
+	// Disabled plugin should not be called.
+	rec2 := &onStreamCompleteRecorder{testPlugin: testPlugin{name: "sc2", enabled: false}}
+	r.Register(rec2)
+	r.OnStreamComplete("model", r.NewStreamStates("model"), "hello", nil)
+	if rec2.called {
+		t.Fatal("OnStreamComplete called for disabled plugin")
+	}
+
+}
