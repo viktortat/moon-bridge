@@ -67,7 +67,7 @@ foundation → （无内部依赖）
 
 当 `protocol/bridge` 需要调用 `extension/plugin` 的功能时，不直接引用 plugin 包，而是：
 
-1. `bridge` 包定义 `PluginHooks` 函数结构体（见 `internal/protocol/bridge/hooks.go`）
+1. `bridge` 包定义 `PluginHooks` 函数结构体（见 `internal/service/bridge/hooks.go`）
 2. `pluginhooks` 包实现 `PluginHooksFromRegistry()` 适配函数
 3. Server 层在初始化时调用适配函数，将 `*plugin.Registry` 转换为 `bridge.PluginHooks`
 
@@ -96,7 +96,7 @@ foundation → （无内部依赖）
 
 ### 日志
 
-- 使用 `internal/foundation/logger` 包，基于 `slog`
+- 使用 `internal/logger` 包，基于 `slog`
 - 调用 `slog.Info()`, `slog.Warn()`, `slog.Error()`, `slog.Debug()` 或 `slog.Default().With(...)`
 - 使用 `With("key", value)` 添加结构化字段，对相关属性群使用 `WithGroup` 或 `slog.Group`
 - 日志级别支持：`debug`、`info`、`warn`、`error`
@@ -106,7 +106,7 @@ foundation → （无内部依赖）
 项目仍在开发中，不需要保留旧配置兼容性。配置结构变更时直接：
 
 1. 更新 `config.example.yml`
-2. 更新 `internal/foundation/config/config_loader.go` 的 `FileConfig` 和 `FromFileConfigWithOptions()`
+2. 更新 `internal/config/config_loader.go` 的 `FileConfig` 和 `FromFileConfigWithOptions()`
 3. 更新相关脚本（`scripts/` 目录）
 4. 更新 README、`docs/config-migration.md` 和本文档
 

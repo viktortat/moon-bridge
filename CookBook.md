@@ -24,7 +24,7 @@
 
 **食材：**
 
-- **Go 1.26+** — `go version` 确认。没有的话去 [go.dev](https://go.dev/dl/) 下载。
+- **Go 1.25+** — `go version` 确认。没有的话去 [go.dev](https://go.dev/dl/) 下载。
 - **API Key** — 推荐 DeepSeek，在 [platform.deepseek.com](https://platform.deepseek.com) 注册后创建 API Key。
 - **一个终端**
 
@@ -32,7 +32,7 @@
 
 ```bash
 go version
-# go version go1.26.0 linux/amd64
+# go version go1.25.0 linux/amd64
 ```
 
 **搞不定：**
@@ -64,19 +64,25 @@ mode: "Transform"
 server:
   addr: "127.0.0.1:38440"
 
-provider:
-  providers:
-    deepseek:
-      base_url: "https://api.deepseek.com/anthropic"
-      api_key: "sk-你的DeepSeek密钥"
-      models:
-        deepseek-chat:
-          context_window: 64000
+models:
+  deepseek-chat:
+    context_window: 64000
 
-  routes:
-    moonbridge: "deepseek/deepseek-chat"
+providers:
+  deepseek:
+    base_url: "https://api.deepseek.com/anthropic"
+    api_key: "sk-你的DeepSeek密钥"
+    offers:
+      - model: deepseek-chat
 
-  default_model: "moonbridge"
+routes:
+  moonbridge:
+    model: deepseek-chat
+    provider: deepseek
+
+defaults:
+  model: moonbridge
+  max_tokens: 4096
 ```
 
 ### 1.2 启动
@@ -134,11 +140,11 @@ curl -s http://localhost:38440/v1/models | head -3
 
 ```bash
 CODEX_HOME_DIR="${CODEX_HOME:-$HOME/.codex}"
-MODEL=$(go run ./cmd/moonbridge --print-codex-model)
+MODEL=$(go run ./cmd/moonbridge -print-codex-model)
 go run ./cmd/moonbridge \
-  --print-codex-config "$MODEL" \
-  --codex-base-url "http://127.0.0.1:38440/v1" \
-  --codex-home "$CODEX_HOME_DIR" \
+  -print-codex-config "$MODEL" \
+  -codex-base-url "http://127.0.0.1:38440/v1" \
+  -codex-home "$CODEX_HOME_DIR" \
   > "$CODEX_HOME_DIR/config.toml"
 ```
 
@@ -173,21 +179,26 @@ CODEX_HOME="$CODEX_HOME_DIR" codex --cd "$PWD"
 替换 `config.yml` 中 `provider.providers` 的内容：
 
 ```yaml
-provider:
-  providers:
-    anthropic:
-      base_url: "https://api.anthropic.com"
-      api_key: "sk-ant-你的密钥"
-      version: "2023-06-01"
-      models:
-        claude-sonnet-4-6:
-          context_window: 200000
+models:
+  claude-sonnet-4-6:
+    context_window: 200000
 
-  routes:
-    moonbridge:
-      to: "anthropic/claude-sonnet-4-6"
+providers:
+  anthropic:
+    base_url: "https://api.anthropic.com"
+    api_key: "sk-ant-你的密钥"
+    version: "2023-06-01"
+    offers:
+      - model: claude-sonnet-4-6
 
-  default_model: "moonbridge"
+routes:
+  moonbridge:
+    model: claude-sonnet-4-6
+    provider: anthropic
+
+defaults:
+  model: moonbridge
+  max_tokens: 4096
 ```
 
 重启 Moon Bridge（Ctrl+C 停掉，再 `go run`），curl 测试。
@@ -267,32 +278,37 @@ extensions:
       max_rounds: 4
       max_tokens: 2048
 
-provider:
-  providers:
-    deepseek:
-      base_url: "https://api.deepseek.com/anthropic"
-      api_key: "sk-你的DeepSeek密钥"
-      models:
-        deepseek-v4-pro:
-          context_window: 1000000
-          extensions:
-            deepseek_v4:
-              enabled: true
-            visual:
-              enabled: true
+models:
+  deepseek-v4-pro:
+    context_window: 1000000
+    extensions:
+      deepseek_v4:
+        enabled: true
+      visual:
+        enabled: true
+  kimi-for-coding:
+    context_window: 128000
 
-    kimi:
-      base_url: "https://api.moonshot.ai/anthropic"
-      api_key: "sk-你的Kimi密钥"
-      models:
-        kimi-for-coding:
-          context_window: 128000
+providers:
+  deepseek:
+    base_url: "https://api.deepseek.com/anthropic"
+    api_key: "sk-你的DeepSeek密钥"
+    offers:
+      - model: deepseek-v4-pro
+  kimi:
+    base_url: "https://api.moonshot.ai/anthropic"
+    api_key: "sk-你的Kimi密钥"
+    offers:
+      - model: kimi-for-coding
 
-  routes:
-    moonbridge:
-      to: "deepseek/deepseek-v4-pro"
+routes:
+  moonbridge:
+    model: deepseek-v4-pro
+    provider: deepseek
 
-  default_model: "moonbridge"
+defaults:
+  model: moonbridge
+  max_tokens: 4096
 ```
 
 重启 Moon Bridge。
@@ -310,23 +326,29 @@ provider:
 **步骤：**
 
 ```yaml
-provider:
-  web_search:
-    support: "injected"
-    tavily_api_key: "tvly-你的密钥"
+web_search:
+  support: "injected"
+  tavily_api_key: "tvly-你的密钥"
 
-  providers:
-    deepseek:
-      base_url: "https://api.deepseek.com/anthropic"
-      api_key: "sk-你的密钥"
-      models:
-        deepseek-chat:
-          context_window: 64000
+models:
+  deepseek-chat:
+    context_window: 64000
 
-  routes:
-    moonbridge: "deepseek/deepseek-chat"
+providers:
+  deepseek:
+    base_url: "https://api.deepseek.com/anthropic"
+    api_key: "sk-你的密钥"
+    offers:
+      - model: deepseek-chat
 
-  default_model: "moonbridge"
+routes:
+  moonbridge:
+    model: deepseek-chat
+    provider: deepseek
+
+defaults:
+  model: moonbridge
+  max_tokens: 4096
 ```
 
 重启 Moon Bridge。

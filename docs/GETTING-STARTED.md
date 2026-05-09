@@ -22,7 +22,7 @@ cd moon-bridge
 go build -o moonbridge ./cmd/moonbridge
 ```
 
-或者直接运行：
+或直接运行：
 
 ```bash
 go run ./cmd/moonbridge -config config.yml
@@ -38,9 +38,7 @@ cp config.example.yml config.yml
 
 详细配置说明见 [CONFIGURATION.md](CONFIGURATION.md)。
 
-### 最小配置示例
-
-以 DeepSeek 为例，编辑 `config.yml`：
+### 最小配置示例（以 DeepSeek 为例）
 
 ```yaml
 mode: "Transform"
@@ -57,7 +55,7 @@ models:
 providers:
   deepseek:
     base_url: "https://api.deepseek.com/anthropic"
-    api_key: "sk-你的-DeepSeek-API-Key"
+    api_key: "sk-你的-API-Key"
     version: "2023-06-01"
     protocol: "anthropic"
     offers:
@@ -69,20 +67,10 @@ routes:
     provider: deepseek
 ```
 
-### 与 Codex CLI 搭配使用
+### 支持四种上游协议
 
-在 Codex Desktop 配置中设置 Moon Bridge 为 OpenAI API Base URL：
-
-```toml
-[openai]
-base_url = "http://127.0.0.1:38440/v1"
-api_key = "any-non-empty-value"
-```
-
-**支持四种协议的上游 Provider：**
-
-| 协议 | 配置 protocol | 示例 Provider |
-|------|---------------|---------------|
+| 协议 | protocol 值 | 示例 Provider |
+|------|-------------|---------------|
 | Anthropic Messages | `anthropic` | DeepSeek、Kimi、Anthropic |
 | OpenAI Responses | `openai-response` | OpenAI（直通） |
 | Google GenAI (Gemini) | `google-genai` | Google Gemini |
@@ -106,21 +94,14 @@ INFO HTTP 服务器监听中 addr=127.0.0.1:38440
 curl http://127.0.0.1:38440/v1/responses \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer any-value" \
-  -d '{
-    "model": "default",
-    "input": "Hello"
-  }'
+  -d '{"model": "default", "input": "Hello"}'
 ```
-
-如果配置正确，将返回 LLM 的响应。
 
 ## 5. 验证模型列表
 
 ```bash
 curl http://127.0.0.1:38440/v1/models
 ```
-
-返回已注册的模型列表，包括来自所有 Provider 的模型及其能力描述。
 
 ## 下一步
 
