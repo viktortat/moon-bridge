@@ -1,0 +1,554 @@
+package visual
+
+import (
+	"context"
+	"encoding/json"
+	"io"
+	"strings"
+	"testing"
+
+	"moonbridge/internal/format"
+)
+
+// fakeCoreUpstream implements CoreProvider for testing the core orchestrator.
+type fakeCoreUpstream struct {
+	responses []*format.CoreResponse
+	requests  []*format.CoreRequest
+}
+
+func (f *fakeCoreUpstream) CreateCore(_ context.Context, req *format.CoreRequest) (*format.CoreResponse, error) {
+	f.requests = append(f.requests, req)
+	if len(f.responses) == 0 {
+		return nil, io.EOF
+	}
+	resp := f.responses[0]
+	f.responses = f.responses[1:]
+	return resp, nil
+}
+
+// fakeCoreVision implements CoreProvider for testing the vision client.
+type fakeCoreVision struct {
+	requests []*format.CoreRequest
+	text     string // canned response text
+}
+
+func (f *fakeCoreVision) CreateCore(_ context.Context, req *format.CoreRequest) (*format.CoreResponse, error) {
+	f.requests = append(f.requests, req)
+	return &format.CoreResponse{
+		ID:     "vision_resp",
+		Status: "completed",
+		Messages: []format.CoreMessage{
+			{
+				Role: "assistant",
+				Content: []format.CoreContentBlock{
+					{Type: "text", Text: f.text},
+				},
+			},
+		},
+	}, nil
+}
+
+type fakeCoreVisionClient struct {
+	requests []AnalysisRequest
+	text     string
+}
+
+func (f *fakeCoreVisionClient) Analyze(_ context.Context, req AnalysisRequest) (string, error) {
+	f.requests = append(f.requests, req)
+	return f.text, nil
+}
+
+// ============================================================================
+// BridgeCoreClient tests
+// ============================================================================
+
+func TestCoreSource(t *testing.T) {
+	for name, tc := range map[string]struct {
+		image         ImageInput
+		wantMediaType string
+		wantHasSource bool
+	}{
+		"http url": {
+			image:         ImageInput{URL: " https://example.test/image.png "},
+			wantMediaType: "",
+			wantHasSource: true,
+		},
+		"data url": {
+			image:         ImageInput{Data: "data:image/jpeg;base64,abc"},
+			wantMediaType: "image/jpeg",
+			wantHasSource: true,
+		},
+		"base64 with mime": {
+			image:         ImageInput{Data: "abc", MimeType: "image/jpeg"},
+			wantMediaType: "image/jpeg",
+			wantHasSource: true,
+		},
+		"base64 default mime": {
+			image:         ImageInput{Data: "abc"},
+			wantMediaType: "image/png",
+			wantHasSource: true,
+		},
+		"attachment label returns nil": {
+			image:         ImageInput{URL: "Image #1"},
+			wantHasSource: false,
+		},
+		"empty data returns nil": {
+			image:         ImageInput{},
+			wantHasSource: false,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			source := tc.image.CoreSource()
+			if !tc.wantHasSource {
+				if source != nil {
+					t.Fatalf("CoreSource() = %+v, want nil", source)
+				}
+				return
+			}
+			if source == nil {
+				t.Fatalf("CoreSource() = nil, want non-nil")
+			}
+			if source.Type != "image" {
+				t.Fatalf("CoreSource().Type = %q, want \"image\"", source.Type)
+			}
+			if source.MediaType != tc.wantMediaType {
+				t.Fatalf("CoreSource().MediaType = %q, want %q", source.MediaType, tc.wantMediaType)
+			}
+			if source.ImageData == "" {
+				t.Fatal("CoreSource().ImageData: empty")
+			}
+		})
+	}
+}
+
+func TestBridgeCoreClientAnalyze(t *testing.T) {
+	vision := &fakeCoreVision{text: "a scenic mountain view"}
+	client := NewBridgeCoreClient(BridgeCoreConfig{
+		Provider:  vision,
+		Model:     "kimi-for-coding",
+		MaxTokens: 512,
+	})
+
+	text, err := client.Analyze(context.Background(), AnalysisRequest{
+		Tool:   ToolVisualBrief,
+		Prompt: "describe this image",
+		Images: []ImageInput{{URL: "https://example.test/a.png"}},
+	})
+	if err != nil {
+		t.Fatalf("Analyze() error = %v", err)
+	}
+	if text != "a scenic mountain view" {
+		t.Fatalf("Analyze() = %q", text)
+	}
+	if len(vision.requests) != 1 {
+		t.Fatalf("vision provider requests = %d, want 1", len(vision.requests))
+	}
+	req := vision.requests[0]
+	if req.Model != "kimi-for-coding" || req.MaxTokens != 512 {
+		t.Fatalf("model/max = %s/%d", req.Model, req.MaxTokens)
+	}
+	if len(req.Messages) != 1 || len(req.Messages[0].Content) != 2 {
+		t.Fatalf("messages = %+v", req.Messages)
+	}
+	imageBlock := req.Messages[0].Content[1]
+	if imageBlock.Type != "image" || imageBlock.ImageData != "https://example.test/a.png" {
+		t.Fatalf("image block = %+v", imageBlock)
+	}
+}
+
+func TestCoreTextFromResponse(t *testing.T) {
+	tests := []struct {
+		name string
+		resp *format.CoreResponse
+		want string
+	}{
+		{
+			name: "multiple text blocks in one message",
+			resp: &format.CoreResponse{
+				Messages: []format.CoreMessage{{
+					Role: "assistant",
+					Content: []format.CoreContentBlock{
+						{Type: "text", Text: "hello"},
+						{Type: "text", Text: "world"},
+					},
+				}},
+			},
+			want: "hello\nworld",
+		},
+		{
+			name: "filters out non-text blocks",
+			resp: &format.CoreResponse{
+				Messages: []format.CoreMessage{{
+					Role: "assistant",
+					Content: []format.CoreContentBlock{
+						{Type: "tool_use", ToolName: "lookup"},
+						{Type: "text", Text: "result text"},
+					},
+				}},
+			},
+			want: "result text",
+		},
+		{
+			name: "nil response returns empty",
+			resp: nil,
+			want: "",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := coreTextFromResponse(tc.resp)
+			if got != tc.want {
+				t.Fatalf("coreTextFromResponse() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// ============================================================================
+// CoreOrchestrator tests
+// ============================================================================
+
+func TestCoreOrchestratorExecutesVisualBrief(t *testing.T) {
+	upstream := &fakeCoreUpstream{
+		responses: []*format.CoreResponse{
+			{
+				ID: "msg_tool", Status: "completed", StopReason: "tool_use",
+				Messages: []format.CoreMessage{{
+					Role: "assistant",
+					Content: []format.CoreContentBlock{{
+						Type: "tool_use", ToolUseID: "toolu_visual", ToolName: ToolVisualBrief,
+						ToolInput: json.RawMessage(`{"image_urls":["https://example.test/a.png"],"context":"inspect UI"}`),
+					}},
+				}},
+			},
+			{
+				ID: "msg_final", Status: "completed", StopReason: "end_turn",
+				Messages: []format.CoreMessage{{
+					Role: "assistant",
+					Content: []format.CoreContentBlock{{Type: "text", Text: "done"}},
+				}},
+			},
+		},
+	}
+	vision := &fakeCoreVisionClient{text: "a clean UI layout with centered text"}
+	orchestrator := NewCoreOrchestrator(CoreOrchestratorConfig{
+		Upstream:  upstream,
+		Client:    vision,
+		MaxRounds: 3,
+	})
+
+	resp, err := orchestrator.CreateCore(context.Background(), &format.CoreRequest{
+		Model: "test-model",
+		ToolChoice: &format.CoreToolChoice{Mode: "auto"},
+	})
+	if err != nil {
+		t.Fatalf("CreateCore() error = %v", err)
+	}
+	if resp.ID != "msg_final" {
+		t.Fatalf("response ID = %q, want msg_final", resp.ID)
+	}
+	if len(vision.requests) != 1 || vision.requests[0].Tool != ToolVisualBrief {
+		t.Fatalf("vision requests = %+v", vision.requests)
+	}
+	if len(upstream.requests) != 2 {
+		t.Fatalf("upstream requests = %d, want 2", len(upstream.requests))
+	}
+}
+
+func TestCoreOrchestratorPreparesRequest(t *testing.T) {
+	upstream := &fakeCoreUpstream{
+		responses: []*format.CoreResponse{
+			{
+				ID: "msg_tool", Status: "completed", StopReason: "tool_use",
+				Messages: []format.CoreMessage{{
+					Role: "assistant",
+					Content: []format.CoreContentBlock{{
+						Type: "tool_use", ToolUseID: "toolu_v", ToolName: ToolVisualBrief,
+						ToolInput: json.RawMessage(`{"image_refs":["Image #1"],"context":"test"}`),
+					}},
+				}},
+			},
+			{
+				ID: "msg_final", Status: "completed", StopReason: "end_turn",
+				Messages: []format.CoreMessage{{
+					Role: "assistant",
+					Content: []format.CoreContentBlock{{Type: "text", Text: "ok"}},
+				}},
+			},
+		},
+	}
+	vision := &fakeCoreVisionClient{text: "visual result"}
+	orchestrator := NewCoreOrchestrator(CoreOrchestratorConfig{
+		Upstream:  upstream,
+		Client:    vision,
+		MaxRounds: 3,
+	})
+
+	_, err := orchestrator.CreateCore(context.Background(), &format.CoreRequest{
+		Model: "test-model",
+		Messages: []format.CoreMessage{{
+			Role: "user",
+			Content: []format.CoreContentBlock{
+				{Type: "text", Text: "what is in this image?"},
+				{Type: "image", ImageData: "abc123", MediaType: "image/png"},
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("CreateCore() error = %v", err)
+	}
+	if len(vision.requests) != 1 || len(vision.requests[0].Images) != 1 {
+		t.Fatalf("vision requests = %+v", vision.requests)
+	}
+	image := vision.requests[0].Images[0]
+	if image.Data != "abc123" || image.MimeType != "image/png" {
+		t.Fatalf("resolved image = %+v", image)
+	}
+	firstMsgContent := upstream.requests[0].Messages[0].Content
+	for _, block := range firstMsgContent {
+		if block.Type == "image" {
+			t.Fatalf("upstream received image block: %+v", firstMsgContent)
+		}
+	}
+	if !strings.Contains(firstMsgContent[1].Text, "Image #1") {
+		t.Fatalf("attachment notice missing: %+v", firstMsgContent)
+	}
+}
+
+func TestCoreOrchestratorLeavesNonVisualToolUse(t *testing.T) {
+	upstream := &fakeCoreUpstream{
+		responses: []*format.CoreResponse{
+			{
+				ID: "msg_tool", Status: "completed", StopReason: "tool_use",
+				Messages: []format.CoreMessage{{
+					Role: "assistant",
+					Content: []format.CoreContentBlock{{
+						Type: "tool_use", ToolUseID: "toolu_lookup", ToolName: "lookup",
+						ToolInput: json.RawMessage(`{"id":"1"}`),
+					}},
+				}},
+			},
+		},
+	}
+	vision := &fakeCoreVisionClient{}
+	orchestrator := NewCoreOrchestrator(CoreOrchestratorConfig{
+		Upstream:  upstream,
+		Client:    vision,
+		MaxRounds: 3,
+	})
+
+	resp, err := orchestrator.CreateCore(context.Background(), &format.CoreRequest{
+		Model: "test-model",
+	})
+	if err != nil {
+		t.Fatalf("CreateCore() error = %v", err)
+	}
+	if resp.ID != "msg_tool" {
+		t.Fatalf("response ID = %q, want msg_tool", resp.ID)
+	}
+	if len(vision.requests) != 0 {
+		t.Fatalf("vision requests = %+v, want none", vision.requests)
+	}
+	if len(upstream.requests) != 1 {
+		t.Fatalf("upstream requests = %d, want 1", len(upstream.requests))
+	}
+}
+
+func TestCoreOrchestratorMaxRounds(t *testing.T) {
+	// Upstream that always returns tool_use, causing the orchestrator to loop indefinitely.
+	toolUseResp := &format.CoreResponse{
+		ID: "msg_1", Status: "completed", StopReason: "tool_use",
+		Messages: []format.CoreMessage{{
+			Role: "assistant",
+			Content: []format.CoreContentBlock{{
+				Type: "tool_use", ToolUseID: "toolu_v", ToolName: ToolVisualBrief,
+				ToolInput: json.RawMessage(`{"image_urls":["https://example.test/a.png"]}`),
+			}},
+		}},
+	}
+	upstream := &fakeCoreUpstream{}
+	// Fill responses with enough tool_use responses to exceed maxRounds+1.
+	for i := 0; i < 10; i++ {
+		upstream.responses = append(upstream.responses, toolUseResp)
+	}
+	vision := &fakeCoreVisionClient{text: "result"}
+	orchestrator := NewCoreOrchestrator(CoreOrchestratorConfig{
+		Upstream:  upstream,
+		Client:    vision,
+		MaxRounds: 1, // maxRounds=1 means 0,1,2 iterations → 3 calls, exceeds max 1
+	})
+
+	_, err := orchestrator.CreateCore(context.Background(), &format.CoreRequest{
+		Model: "test-model",
+	})
+	if err == nil || !strings.Contains(err.Error(), "exceeded max rounds") {
+		t.Fatalf("expected max rounds error, got: %v", err)
+	}
+}
+
+// ============================================================================
+// Utility tests
+// ============================================================================
+
+func TestCoreSplitVisualToolUses(t *testing.T) {
+	visual, nonVisual := coreSplitVisualToolUses([]format.CoreContentBlock{
+		{Type: "text", Text: "hello"},
+		{Type: "tool_use", ToolName: ToolVisualBrief, ToolUseID: "1"},
+		{Type: "tool_use", ToolName: "lookup", ToolUseID: "2"},
+		{Type: "tool_use", ToolName: ToolVisualQA, ToolUseID: "3"},
+	})
+	if len(visual) != 2 {
+		t.Fatalf("visualUses = %d, want 2", len(visual))
+	}
+	if len(nonVisual) != 1 {
+		t.Fatalf("nonVisualToolUses = %d, want 1", len(nonVisual))
+	}
+}
+
+func TestFindLastAssistantMessage(t *testing.T) {
+	msgs := []format.CoreMessage{
+		{Role: "user", Content: []format.CoreContentBlock{{Type: "text", Text: "hi"}}},
+		{Role: "assistant", Content: []format.CoreContentBlock{{Type: "text", Text: "hello"}}},
+		{Role: "user", Content: []format.CoreContentBlock{{Type: "text", Text: "again"}}},
+	}
+	last := findLastAssistantMessage(msgs)
+	if last == nil {
+		t.Fatal("findLastAssistantMessage returned nil")
+	}
+	if last.Content[0].Text != "hello" {
+		t.Fatalf("last = %+v", last)
+	}
+	msgs2 := []format.CoreMessage{{Role: "user"}}
+	if last := findLastAssistantMessage(msgs2); last != nil {
+		t.Fatalf("expected nil, got %+v", last)
+	}
+}
+
+func TestImageInputFromCoreBlock(t *testing.T) {
+	tests := []struct {
+		name     string
+		block    format.CoreContentBlock
+		wantOK   bool
+		wantURL  string
+		wantData string
+	}{
+		{
+			name:    "url-based with empty media type",
+			block:   format.CoreContentBlock{Type: "image", ImageData: "https://example.test/a.png"},
+			wantOK:  true,
+			wantURL: "https://example.test/a.png",
+		},
+		{
+			name:     "base64 with media type",
+			block:    format.CoreContentBlock{Type: "image", ImageData: "abc", MediaType: "image/png"},
+			wantOK:   true,
+			wantData: "abc",
+		},
+		{
+			name:   "empty image data",
+			block:  format.CoreContentBlock{Type: "image", ImageData: ""},
+			wantOK: false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := imageInputFromCoreBlock(tc.block)
+			if ok != tc.wantOK {
+				t.Fatalf("ok = %v, want %v", ok, tc.wantOK)
+			}
+			if ok && got.URL != tc.wantURL {
+				t.Fatalf("URL = %q, want %q", got.URL, tc.wantURL)
+			}
+			if ok && got.Data != tc.wantData {
+				t.Fatalf("Data = %q, want %q", got.Data, tc.wantData)
+			}
+		})
+	}
+}
+
+// ============================================================================
+// Regression tests: Core-level image stripping (visual leak fix)
+// ============================================================================
+
+func TestPrepareCoreRequestForVisual_StripsBase64(t *testing.T) {
+	req := &format.CoreRequest{
+		Model: "test-model",
+		Messages: []format.CoreMessage{{
+			Role: "user",
+			Content: []format.CoreContentBlock{
+				{Type: "text", Text: "描述图片"},
+				{Type: "image", ImageData: "verylongbase64data", MediaType: "image/png"},
+			},
+		}},
+	}
+
+	stripped, _ := prepareCoreRequestForVisual(req)
+
+	for _, msg := range stripped.Messages {
+		for _, block := range msg.Content {
+			if block.Type == "image" {
+				t.Fatal("prepareCoreRequestForVisual: image block still present after stripping")
+			}
+		}
+	}
+	foundPlaceholder := false
+	for _, msg := range stripped.Messages {
+		for _, block := range msg.Content {
+			if block.Type == "text" && strings.Contains(block.Text, "Image #1") {
+				foundPlaceholder = true
+			}
+		}
+	}
+	if !foundPlaceholder {
+		t.Fatal("prepareCoreRequestForVisual: no Image #1 placeholder found")
+	}
+}
+
+func TestPrepareCoreRequestForVisual_TextOnlyUnchanged(t *testing.T) {
+	req := &format.CoreRequest{
+		Model: "test-model",
+		Messages: []format.CoreMessage{{
+			Role:    "user",
+			Content: []format.CoreContentBlock{{Type: "text", Text: "hello"}},
+		}},
+	}
+
+	stripped, images := prepareCoreRequestForVisual(req)
+
+	if len(images) != 0 {
+		t.Fatalf("prepareCoreRequestForVisual: got %d images for text-only request, want 0", len(images))
+	}
+	if len(stripped.Messages) != 1 || stripped.Messages[0].Content[0].Text != "hello" {
+		t.Fatal("prepareCoreRequestForVisual: text-only request was modified")
+	}
+}
+
+func TestPrepareCoreRequestForVisual_MixedContent(t *testing.T) {
+	req := &format.CoreRequest{
+		Model: "test-model",
+		Messages: []format.CoreMessage{{
+			Role: "user",
+			Content: []format.CoreContentBlock{
+				{Type: "text", Text: "a"},
+				{Type: "image", ImageData: "b64_1", MediaType: "image/png"},
+				{Type: "text", Text: "b"},
+				{Type: "image", ImageData: "b64_2", MediaType: "image/jpeg"},
+			},
+		}},
+	}
+
+	stripped, images := prepareCoreRequestForVisual(req)
+
+	if len(images) != 2 {
+		t.Fatalf("prepareCoreRequestForVisual: got %d images, want 2", len(images))
+	}
+	blockCount := len(stripped.Messages[0].Content)
+	if blockCount != 4 {
+		t.Fatalf("expected 4 blocks (2 text + 2 placeholders), got %d", blockCount)
+	}
+	for _, block := range stripped.Messages[0].Content {
+		if block.Type == "image" {
+			t.Fatal("image block still present")
+		}
+	}
+}

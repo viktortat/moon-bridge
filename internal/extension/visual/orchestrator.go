@@ -187,6 +187,20 @@ func prepareRequestForVisual(req anthropic.MessageRequest) (anthropic.MessageReq
 	return req, availableImages
 }
 
+// StripImagesFromAnthropic strips image blocks from an anthropic MessageRequest and
+// replaces them with text placeholders. Returns the stripped request and whether
+// any images were found and stripped. Unlike prepareRequestForVisual, this does not
+// return the extracted images (the caller doesn't need them for streaming).
+func StripImagesFromAnthropic(req anthropic.MessageRequest) (anthropic.MessageRequest, bool) {
+	modified := false
+	newReq, images := prepareRequestForVisual(req)
+	_ = images
+	if len(images) > 0 {
+		modified = true
+	}
+	return newReq, modified
+}
+
 func imageInputFromAnthropicSource(source *anthropic.ImageSource) (ImageInput, bool) {
 	if source == nil {
 		return ImageInput{}, false

@@ -239,3 +239,112 @@ func TestOrchestratorCollectsStreamToolInput(t *testing.T) {
 		t.Fatalf("stream events = %+v", events)
 	}
 }
+
+// ============================================================================
+// Regression tests: image stripping (visual leak fix)
+// ============================================================================
+
+func TestStripImagesFromAnthropic_StripsBase64(t *testing.T) {
+	req := anthropic.MessageRequest{
+		Model: "test-model",
+		Messages: []anthropic.Message{{
+			Role: "user",
+			Content: []anthropic.ContentBlock{
+				{Type: "text", Text: "描述图片"},
+				{Type: "image", Source: &anthropic.ImageSource{Type: "base64", MediaType: "image/png", Data: "verylongbase64data1234567890"}},
+			},
+		}},
+	}
+
+	stripped, modified := StripImagesFromAnthropic(req)
+
+	if !modified {
+		t.Fatal("StripImagesFromAnthropic: modified = false, want true")
+	}
+	for _, msg := range stripped.Messages {
+		for _, block := range msg.Content {
+			if block.Type == "image" {
+				t.Fatal("StripImagesFromAnthropic: image block still present after stripping")
+			}
+		}
+	}
+	// Verify text placeholder was inserted
+	foundPlaceholder := false
+	for _, msg := range stripped.Messages {
+		for _, block := range msg.Content {
+			if block.Type == "text" && block.Text != "描述图片" {
+				foundPlaceholder = true
+			}
+		}
+	}
+	if !foundPlaceholder {
+		t.Fatal("StripImagesFromAnthropic: no text placeholder found after stripping")
+	}
+}
+
+func TestStripImagesFromAnthropic_TextOnlyUnchanged(t *testing.T) {
+	req := anthropic.MessageRequest{
+		Model: "test-model",
+		Messages: []anthropic.Message{{
+			Role:    "user",
+			Content: []anthropic.ContentBlock{{Type: "text", Text: "hello"}},
+		}},
+	}
+
+	stripped, modified := StripImagesFromAnthropic(req)
+
+	if modified {
+		t.Fatal("StripImagesFromAnthropic: modified = true, want false for text-only request")
+	}
+	if len(stripped.Messages) != 1 || stripped.Messages[0].Content[0].Text != "hello" {
+		t.Fatal("StripImagesFromAnthropic: text-only request was modified")
+	}
+}
+
+func TestStripImagesFromAnthropic_MixedContent(t *testing.T) {
+	req := anthropic.MessageRequest{
+		Model: "test-model",
+		Messages: []anthropic.Message{{
+			Role: "user",
+			Content: []anthropic.ContentBlock{
+				{Type: "text", Text: "first"},
+				{Type: "image", Source: &anthropic.ImageSource{Type: "base64", MediaType: "image/png", Data: "b64_1"}},
+				{Type: "text", Text: "between"},
+				{Type: "image", Source: &anthropic.ImageSource{Type: "base64", MediaType: "image/jpeg", Data: "b64_2"}},
+				{Type: "text", Text: "last"},
+			},
+		}},
+	}
+
+	stripped, modified := StripImagesFromAnthropic(req)
+
+	if !modified {
+		t.Fatal("StripImagesFromAnthropic: modified = false, want true")
+	}
+	for _, msg := range stripped.Messages {
+		for _, block := range msg.Content {
+			if block.Type == "image" {
+				t.Fatal("image block still present")
+			}
+		}
+	}
+	// Should have 5 text blocks (original 3 text + 2 image placeholders)
+	textCount := 0
+	placeholderCount := 0
+	for _, msg := range stripped.Messages {
+		for _, block := range msg.Content {
+			if block.Type == "text" {
+				textCount++
+				if block.Text != "first" && block.Text != "between" && block.Text != "last" {
+					placeholderCount++
+				}
+			}
+		}
+	}
+	if textCount != 5 {
+		t.Fatalf("expected 5 text blocks (3 original + 2 placeholders), got %d", textCount)
+	}
+	if placeholderCount != 2 {
+		t.Fatalf("expected 2 placeholder blocks, got %d", placeholderCount)
+	}
+}

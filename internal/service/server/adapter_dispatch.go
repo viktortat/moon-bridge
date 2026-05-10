@@ -235,22 +235,30 @@ func (s *Server) handleWithAdapters(
 			return
 		}
 
-		// Wrap with visual orchestrator if enabled for this model.
-		// This strips base64 image data before sending to text-only models.
-		var upstreamRespMsg anthropic.MessageResponse
-		if visProv := s.wrapAnthropicWithVisual(ctx, openAIReq.Model, effectiveProvider); visProv != nil {
-			upstreamRespMsg, err = visProv.CreateMessage(ctx, *upstreamReq)
-		} else {
-			var rawResp any
-			rawResp, err = effectiveProvider.CreateMessage(ctx, *upstreamReq)
-			if err == nil {
-				var okt bool
-				upstreamRespMsg, okt = rawResp.(anthropic.MessageResponse)
-				if !okt {
-					err = fmt.Errorf("unexpected anthropic response type %T", rawResp)
+			// Wrap with visual orchestrator at Core level if enabled for this model.
+			// This uses CoreProvider, which is protocol-agnostic.
+			if visProv := s.wrapWithVisual(ctx, openAIReq.Model, preferred, providerAdapter); visProv != nil {
+				var coreRespApi *format.CoreResponse
+				coreRespApi, err = visProv.CreateCore(ctx, coreReq)
+				if err == nil {
+					coreResp = coreRespApi
+				}
+			} else {
+				var upstreamRespMsg anthropic.MessageResponse
+				var rawResp any
+				rawResp, err = effectiveProvider.CreateMessage(ctx, *upstreamReq)
+				if err == nil {
+					var okt bool
+					upstreamRespMsg, okt = rawResp.(anthropic.MessageResponse)
+					if !okt {
+						err = fmt.Errorf("unexpected anthropic response type %T", rawResp)
+					} else {
+						// Normal path: convert back to CoreResponse.
+						msgResp := upstreamRespMsg
+						coreResp, err = providerAdapter.ToCoreResponse(ctx, &msgResp)
+					}
 				}
 			}
-		}
 		if err != nil {
 			log.Error("adapter path: CreateMessage failed", "error", err)
 			payload := openai.ErrorResponse{
@@ -265,28 +273,6 @@ func (s *Server) handleWithAdapters(
 			writeOpenAIError(w, http.StatusBadGateway, payload)
 			return
 		}
-
-		// Anthropic response → CoreResponse.
-		msgResp := upstreamRespMsg
-		coreResp, err = providerAdapter.ToCoreResponse(ctx, &msgResp)
-		if err != nil {
-			log.Error("adapter path: Anthropic ToCoreResponse failed", "error", err)
-			payload := openai.ErrorResponse{
-				Error: openai.ErrorObject{
-					Message: fmt.Sprintf("response conversion failed: %v", err),
-					Type:    "server_error",
-					Code:    "conversion_error",
-				},
-			}
-			record.Error = traceError("to_core_response", err)
-			record.OpenAIResponse = payload
-			writeOpenAIError(w, http.StatusInternalServerError, payload)
-			return
-		}
-
-		// Remember response content for plugin state tracking (pending Plan 02).
-		// ProviderClient returns any; adapter converts via ToCoreResponse.
-		_ = sess
 
 	case config.ProtocolOpenAIChat:
 		chatReq, ok := upstreamAny.(*chat.ChatRequest)
@@ -713,6 +699,17 @@ func (s *Server) handleAdapterStream(
 			streamRecord.OpenAIResponse = payload
 			writeOpenAIError(w, http.StatusInternalServerError, payload)
 			return
+		}
+		// Strip image blocks from anthropic request if visual extension is enabled.
+		// This prevents base64 image data from being sent to text-only models.
+		if s.pluginRegistry != nil && s.runtime != nil && openAIReq.Model != "" {
+			cfgV := s.runtime.Current().Config
+			pluginCfg := config.PluginFromGlobalConfig(&cfgV)
+			visCfg, visOk := visualpkg.ConfigForModel(pluginCfg, openAIReq.Model)
+			if visOk && visCfg.Provider != "" && visCfg.Model != "" {
+				strippedReq, _ := visualpkg.StripImagesFromAnthropic(*anthReq)
+				anthReq = &strippedReq
+			}
 		}
 		stream, err := acc.AnthropicClient().StreamMessage(ctx, *anthReq)
 		if err != nil {
@@ -1203,11 +1200,42 @@ func (s *Server) handleAdapterStream(
 	}
 }
 
+// ============================================================================
+// Protocol-Agnostic Visual Bridge
+// ============================================================================
 
-// wrapAnthropicWithVisual wraps an anthropic provider with the visual orchestrator
-// if the visual extension is enabled and configured for this model alias.
-// Returns nil when visual is not applicable.
-func (s *Server) wrapAnthropicWithVisual(ctx context.Context, modelAlias string, effectiveProvider provider.ProviderClient) visualpkg.Provider {
+// adapterCoreProvider wraps a ProviderAdapter + ProviderClient pair into a
+// CoreProvider so the visual orchestrator can operate on format.CoreRequest
+// without knowing the underlying protocol.
+type adapterCoreProvider struct {
+	adapter format.ProviderAdapter
+	client  provider.ProviderClient
+}
+
+func newAdapterCoreProvider(adapter format.ProviderAdapter, client provider.ProviderClient) *adapterCoreProvider {
+	return &adapterCoreProvider{adapter: adapter, client: client}
+}
+
+func (p *adapterCoreProvider) CreateCore(ctx context.Context, req *format.CoreRequest) (*format.CoreResponse, error) {
+	upstreamAny, err := p.adapter.FromCoreRequest(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	rawResp, err := p.client.CreateMessage(ctx, upstreamAny)
+	if err != nil {
+		return nil, err
+	}
+	return p.adapter.ToCoreResponse(ctx, rawResp)
+}
+
+// wrapWithVisual returns a CoreProvider that wraps the upstream provider with
+// visual orchestration, or nil when visual is not applicable for this model.
+func (s *Server) wrapWithVisual(
+	ctx context.Context,
+	modelAlias string,
+	preferred provider.ProviderCandidate,
+	providerAdapter format.ProviderAdapter,
+) visualpkg.CoreProvider {
 	if s.pluginRegistry == nil || s.runtime == nil || modelAlias == "" || s.providerMgr == nil {
 		return nil
 	}
@@ -1219,25 +1247,34 @@ func (s *Server) wrapAnthropicWithVisual(ctx context.Context, modelAlias string,
 		return nil
 	}
 
-
-	// Get the upstream anthropic client.
-	upstreamAcc, ok := effectiveProvider.(provider.AnthropicClientAccessor)
-	if !ok {
+	effectiveClient := preferred.Client
+	if effectiveClient == nil {
+		slog.Default().Warn("visual: no upstream client resolved")
 		return nil
 	}
 
-	// Get the visual provider anthropic client.
+	// Upstream CoreProvider = adapter + client.
+	upstreamCP := newAdapterCoreProvider(providerAdapter, effectiveClient)
+
+	// Visual provider CoreProvider.
 	visClient, err := s.providerMgr.ClientForKey(visCfg.Provider)
 	if err != nil || visClient == nil {
 		slog.Default().Warn("visual: provider not found", "visual_provider", visCfg.Provider, "model", modelAlias)
 		return nil
 	}
-	visAcc, ok := visClient.(provider.AnthropicClientAccessor)
-	if !ok {
+	visProtocol := s.providerMgr.ProtocolForKey(visCfg.Provider)
+	if visProtocol == "" {
+		slog.Default().Warn("visual: cannot resolve visual provider protocol")
 		return nil
 	}
+	visAdapter, ok := s.adapterRegistry.GetProvider(visProtocol)
+	if !ok {
+		slog.Default().Warn("visual: no provider adapter for visual protocol", "protocol", visProtocol)
+		return nil
+	}
+	visCP := newAdapterCoreProvider(visAdapter, visClient)
 
-	return visualpkg.WrapProvider(upstreamAcc.AnthropicClient(), visAcc.AnthropicClient(), visCfg.Model, visCfg.MaxRounds, visCfg.MaxTokens)
+	return visualpkg.NewCoreBridge(upstreamCP, visCP, visCfg.Model, visCfg.MaxRounds, visCfg.MaxTokens)
 }
 
 // injectAnthropicWebSearch adds the Anthropic web_search_20250305 server tool
@@ -1468,3 +1505,4 @@ func formatContentSliceToAnthropic(blocks []format.CoreContentBlock) []anthropic
 	}
 	return result
 }
+
