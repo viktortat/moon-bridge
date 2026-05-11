@@ -7,6 +7,7 @@ import (
 	dbd1 "moonbridge/internal/extension/db/d1"
 	dbsqlite "moonbridge/internal/extension/db/sqlite"
 	deepseekv4 "moonbridge/internal/extension/deepseek_v4"
+	kimiworkaround "moonbridge/internal/extension/kimi_workaround"
 	mbtrics "moonbridge/internal/extension/metrics"
 	"moonbridge/internal/extension/plugin"
 	"moonbridge/internal/extension/visual"
@@ -30,6 +31,7 @@ func BuiltinExtensions() BuiltinExtensionCatalog {
 func (cat BuiltinExtensionCatalog) ConfigSpecs() []config.ExtensionConfigSpec {
 	var specs []config.ExtensionConfigSpec
 	specs = append(specs, deepseekv4.ConfigSpecs()...)
+	specs = append(specs, kimiworkaround.ConfigSpecs()...)
 	specs = append(specs, visual.ConfigSpecs()...)
 	specs = append(specs, dbsqlite.ConfigSpecs()...)
 	specs = append(specs, dbd1.ConfigSpecs()...)
@@ -39,6 +41,9 @@ func (cat BuiltinExtensionCatalog) ConfigSpecs() []config.ExtensionConfigSpec {
 
 func (cat BuiltinExtensionCatalog) NewRegistry(logger *slog.Logger, cfg config.Config) *plugin.Registry {
 	registry := plugin.NewRegistry(logger)
+	registry.Register(kimiworkaround.NewPlugin(func(model string) bool {
+		return cfg.ExtensionEnabled("kimi_workaround", model)
+	}))
 	registry.Register(deepseekv4.NewPlugin(func(model string) bool {
 		return cfg.ExtensionEnabled("deepseek_v4", model)
 	}))

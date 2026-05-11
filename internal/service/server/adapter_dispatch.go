@@ -581,17 +581,6 @@ func (s *Server) handleWithAdapters(
 				CachedInputTokens: coreResp.Usage.CachedInputTokens,
 			}, true) // input tokens now include cache (normalized at adapter level)
 		}
-		s.onRequestCompleted(openAIReq.Model, preferred.UpstreamModel, preferred.ProviderKey, requestStart, usage, 0, "success", "")
-
-		// Record usage statistics.
-		if s.stats != nil {
-			s.stats.Record(openAIReq.Model, preferred.UpstreamModel, stats.Usage{
-				InputTokens:              coreResp.Usage.InputTokens,
-				OutputTokens:             coreResp.Usage.OutputTokens,
-				CacheReadInputTokens:     coreResp.Usage.CachedInputTokens,
-				CacheCreationInputTokens: 0,
-			})
-		}
 
 		// Log detailed metrics for non-streaming request.
 		inputTotal := coreResp.Usage.InputTokens
@@ -627,6 +616,22 @@ func (s *Server) handleWithAdapters(
 			"request_cost", reqCost,
 			"duration", reqDuration,
 		)
+
+		s.onRequestCompleted(
+			openAIReq.Model, preferred.UpstreamModel, preferred.ProviderKey,
+			requestStart, usage,
+			reqCost, "success", "",
+		)
+
+		// Record usage statistics.
+		if s.stats != nil {
+			s.stats.Record(openAIReq.Model, preferred.UpstreamModel, stats.Usage{
+				InputTokens:              coreResp.Usage.InputTokens,
+				OutputTokens:             coreResp.Usage.OutputTokens,
+				CacheReadInputTokens:     coreResp.Usage.CachedInputTokens,
+				CacheCreationInputTokens: 0,
+			})
+		}
 	}
 }
 
@@ -1213,7 +1218,12 @@ func (s *Server) handleAdapterStream(
 				CachedInputTokens: finalUsage.InputTokensDetails.CachedTokens,
 			}, true) // input tokens now include cache (normalized at adapter level)
 		}
-		s.onRequestCompleted(openAIReq.Model, candidate.UpstreamModel, candidate.ProviderKey, requestStart, usage, 0, "success", "")
+		reqCost := computeCostWithProviderPricing(s.providerMgr, s.stats, openAIReq.Model, candidate.UpstreamModel, candidate.ProviderKey, billingUsage)
+		s.onRequestCompleted(
+			openAIReq.Model, candidate.UpstreamModel, candidate.ProviderKey,
+			requestStart, usage,
+			reqCost, "success", "",
+		)
 	}
 }
 

@@ -31,6 +31,26 @@ extensions:
       model: "kimi-for-coding"
       max_rounds: 4
       max_tokens: 2048
+  # Kimi model tool call round limiter: injects progress/limit prompts
+  # after each tool_result batch to prevent runaway information gathering.
+  #
+  # Enable at model level to activate:
+  #   models:
+  #     my-kimi-model:
+  #       extensions:
+  #         kimi_workaround:
+  #           enabled: true
+  kimi_workaround:
+    config:
+      max_tool_rounds: 50
+      convergence_margin: 0.8
+  # Example model with kimi_workaround enabled:
+  # my-kimi-model:
+  #   context_window: 128000
+  #   extensions:
+  #     kimi_workaround:
+  #       enabled: true
+
   # Database provider: SQLite
   db_sqlite:
     enabled: true

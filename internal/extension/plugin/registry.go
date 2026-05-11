@@ -504,6 +504,18 @@ func (r *Registry) CorePluginHooks() format.CorePluginHooks {
 				return f.FilterCoreContent(ctx, block)
 			}
 		}
+		// RewriteMessages — only chain plugins enabled for this model.
+		if mw, ok := p.(MessageRewriter); ok {
+			prev := hooks.RewriteMessages
+			plugin := p.(Plugin) // for EnabledForModel check
+			hooks.RewriteMessages = func(ctx context.Context, req *format.CoreRequest) {
+				if prev != nil { prev(ctx, req) }
+				pluginCtx := &RequestContext{ModelAlias: req.Model}
+				if plugin.EnabledForModel(req.Model) {
+					req.Messages = mw.RewriteMessages(pluginCtx, req.Messages)
+				}
+			}
+		}
 		// RememberCoreContent
 		if rmem, ok := p.(CoreContentRememberer); ok {
 			prev := hooks.RememberContent

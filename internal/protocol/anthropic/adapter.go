@@ -250,6 +250,7 @@ func (a *AnthropicProviderAdapter) FromCoreRequest(ctx context.Context, req *for
 	}
 
 	// Step 1: Allow plugins to mutate the CoreRequest before conversion.
+	a.hooks.RewriteMessages(ctx, req)
 	a.hooks.MutateCoreRequest(ctx, req)
 
 	// Strip base64 image data from all text content to prevent token waste.
