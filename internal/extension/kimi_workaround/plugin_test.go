@@ -110,17 +110,18 @@ func TestRewriteMessages_AtLimit(t *testing.T) {
 	msgs := buildToolConversation(10)
 	result := p.RewriteMessages(nil, msgs)
 
-	// 10 rounds = 21 messages. No new messages, prompts appended to tool_result.
+	// 10 rounds = 21 messages. At limit → tool_result REPLACED with error.
 	if len(result) != 21 {
-		t.Fatalf("expected 21 messages (appended, no new msg), got %d", len(result))
+		t.Fatalf("expected 21 messages (replaced, no new msg), got %d", len(result))
 	}
-	// Last tool_result should have 3 blocks: original + SystemReminder + at-limit
+	// Last tool_result should have 1 block: replaced error message
 	lastBlock := result[len(result)-1].Content[0]
-	if lastBlock.Type != "tool_result" || len(lastBlock.ToolResultContent) != 3 {
-		t.Fatalf("expected 3 blocks (original + 2 prompts), got %d", len(lastBlock.ToolResultContent))
+	if lastBlock.Type != "tool_result" || len(lastBlock.ToolResultContent) != 1 {
+		t.Fatalf("expected 1 block in replaced tool_result, got %d: %+v", len(lastBlock.ToolResultContent), lastBlock.ToolResultContent)
 	}
-	if lastBlock.ToolResultContent[2].Text != DefaultLimitPromptAtLimit {
-		t.Fatalf("expected at-limit prompt at end, got: %s", lastBlock.ToolResultContent[2].Text)
+	// Verify it contains the MAX_TOOL_ROUNDS error
+	if !strings.Contains(lastBlock.ToolResultContent[0].Text, "MAX_TOOL_ROUNDS") {
+		t.Fatalf("expected MAX_TOOL_ROUNDS error in replaced tool_result, got: %s", lastBlock.ToolResultContent[0].Text)
 	}
 }
 

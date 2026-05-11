@@ -166,11 +166,9 @@ func (p *Plugin) RewriteMessages(ctx *plugin.RequestContext, messages []format.C
 		return messages
 	}
 
-	// Append prompts to the last tool_result's text content instead of injecting
-	// new user messages. The API protocol requires tool_use and its tool_result
-	// to be adjacent — inserting a user message between them breaks the pairing.
-	//
-	// Find the last tool_result in the batch and append the prompt text to it.
+	// When approaching limit: append prompts to the last tool_result's content.
+	// When AT limit: REPLACE the last tool_result's content with a hard error
+	// so the model sees that tools are "broken" and must produce a final answer.
 	threshold := int(float64(p.maxRounds) * p.margin)
 	messagesCopy := make([]format.CoreMessage, len(messages))
 	copy(messagesCopy, messages)
@@ -181,19 +179,26 @@ func (p *Plugin) RewriteMessages(ctx *plugin.RequestContext, messages []format.C
 		if msg.Role == "tool" || (msg.Role == "user" && isToolResultMessage(*msg)) {
 			for j := len(msg.Content) - 1; j >= 0; j-- {
 				if msg.Content[j].Type == "tool_result" && msg.Content[j].ToolUseID != "" {
-					// Append the reminder prompt to this tool_result's text content.
+					if roundCount >= p.maxRounds {
+						// Hard cap reached — replace tool_result content with an error.
+						// The model will see the tool as failed and stop calling it.
+						errJSON := fmt.Sprintf(
+							"{\"error\":\"MAX_TOOL_ROUNDS\",\"message\":\"Tool call limit reached after %d rounds. Must produce final response immediately without any additional tool calls.\"}",
+							p.maxRounds,
+						)
+						msg.Content[j].ToolResultContent = []format.CoreContentBlock{{
+							Type: "text",
+							Text: errJSON,
+						}}
+						return messagesCopy
+					}
+					// Approaching limit — append prompts.
 					prompt := fmt.Sprintf(DefaultPrompt, roundCount, p.maxRounds)
 					msg.Content[j].ToolResultContent = append(
 						msg.Content[j].ToolResultContent,
 						format.CoreContentBlock{Type: "text", Text: prompt},
 					)
-					// Append convergence prompt as well.
-					if roundCount >= p.maxRounds {
-						msg.Content[j].ToolResultContent = append(
-							msg.Content[j].ToolResultContent,
-							format.CoreContentBlock{Type: "text", Text: DefaultLimitPromptAtLimit},
-						)
-					} else if roundCount >= threshold {
+					if roundCount >= threshold {
 						msg.Content[j].ToolResultContent = append(
 							msg.Content[j].ToolResultContent,
 							format.CoreContentBlock{Type: "text", Text: DefaultLimitPrompt},
