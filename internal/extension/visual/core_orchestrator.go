@@ -34,7 +34,6 @@ type CoreOrchestratorConfig struct {
 }
 
 // NewCoreOrchestrator creates a CoreOrchestrator.
-// If Client is nil, it falls back to creating a BridgeCoreClient from the config.
 func NewCoreOrchestrator(cfg CoreOrchestratorConfig) *CoreOrchestrator {
 	maxRounds := cfg.MaxRounds
 	if maxRounds <= 0 {
@@ -54,10 +53,15 @@ func (o *CoreOrchestrator) CreateCore(ctx context.Context, req *format.CoreReque
 	if o == nil || o.upstream == nil {
 		return nil, fmt.Errorf("visual upstream provider is nil")
 	}
+	if o.client == nil {
+		return nil, fmt.Errorf("visual client is nil")
+	}
 	req, availableImages := prepareCoreRequestForVisual(req)
 	log := slog.Default()
+	aggregatedUsage := format.CoreUsage{}
+	hasAggregatedUsage := false
 
-	for round := 0; round <= o.maxRounds; round++ {
+	for round := 0; round < o.maxRounds; round++ {
 		resp, err := o.upstream.CreateCore(ctx, req)
 		if err != nil {
 			return nil, err
@@ -65,21 +69,25 @@ func (o *CoreOrchestrator) CreateCore(ctx context.Context, req *format.CoreReque
 		if resp == nil {
 			return nil, fmt.Errorf("upstream returned nil response")
 		}
+		if coreUsagePresent(resp.Usage) {
+			hasAggregatedUsage = true
+			aggregateCoreUsage(&aggregatedUsage, resp.Usage)
+		}
 
 		// If not a tool_use stop, we're done.
 		if resp.StopReason != "tool_use" {
-			return resp, nil
+			return applyCoreUsageAggregation(resp, aggregatedUsage, hasAggregatedUsage), nil
 		}
 
 		// Find visual tool uses in the last assistant message.
 		lastAssistant := findLastAssistantMessage(resp.Messages)
 		if lastAssistant == nil {
-			return resp, nil
+			return applyCoreUsageAggregation(resp, aggregatedUsage, hasAggregatedUsage), nil
 		}
 
 		toolUses, nonVisual := coreSplitVisualToolUses(lastAssistant.Content)
 		if len(nonVisual) > 0 || len(toolUses) == 0 {
-			return resp, nil
+			return applyCoreUsageAggregation(resp, aggregatedUsage, hasAggregatedUsage), nil
 		}
 
 		// Execute each visual tool via the vision client.
@@ -87,8 +95,8 @@ func (o *CoreOrchestrator) CreateCore(ctx context.Context, req *format.CoreReque
 		for _, toolUse := range toolUses {
 			result := o.executeCoreVisualTool(ctx, toolUse, availableImages)
 			toolResults = append(toolResults, format.CoreContentBlock{
-				Type:         "tool_result",
-				ToolUseID:    toolUse.ToolUseID,
+				Type:              "tool_result",
+				ToolUseID:         toolUse.ToolUseID,
 				ToolResultContent: []format.CoreContentBlock{{Type: "text", Text: result}},
 			})
 		}
@@ -240,4 +248,24 @@ func coreAnalysisRequestFromToolUse(toolUse format.CoreContentBlock, availableIm
 	default:
 		return AnalysisRequest{}, fmt.Errorf("unknown visual tool %q", toolUse.ToolName)
 	}
+}
+
+func coreUsagePresent(usage format.CoreUsage) bool {
+	return usage.InputTokens > 0 || usage.OutputTokens > 0 || usage.CachedInputTokens > 0 || usage.TotalTokens > 0
+}
+
+func aggregateCoreUsage(total *format.CoreUsage, usage format.CoreUsage) {
+	total.InputTokens += usage.InputTokens
+	total.OutputTokens += usage.OutputTokens
+	total.CachedInputTokens += usage.CachedInputTokens
+	total.TotalTokens = total.InputTokens + total.OutputTokens
+}
+
+func applyCoreUsageAggregation(resp *format.CoreResponse, usage format.CoreUsage, hasUsage bool) *format.CoreResponse {
+	if resp == nil || !hasUsage {
+		return resp
+	}
+	resp.Usage = usage
+	resp.Usage.TotalTokens = resp.Usage.InputTokens + resp.Usage.OutputTokens
+	return resp
 }

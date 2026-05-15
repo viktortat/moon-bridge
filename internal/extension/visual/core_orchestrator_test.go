@@ -224,7 +224,7 @@ func TestCoreOrchestratorExecutesVisualBrief(t *testing.T) {
 			{
 				ID: "msg_final", Status: "completed", StopReason: "end_turn",
 				Messages: []format.CoreMessage{{
-					Role: "assistant",
+					Role:    "assistant",
 					Content: []format.CoreContentBlock{{Type: "text", Text: "done"}},
 				}},
 			},
@@ -238,7 +238,7 @@ func TestCoreOrchestratorExecutesVisualBrief(t *testing.T) {
 	})
 
 	resp, err := orchestrator.CreateCore(context.Background(), &format.CoreRequest{
-		Model: "test-model",
+		Model:      "test-model",
 		ToolChoice: &format.CoreToolChoice{Mode: "auto"},
 	})
 	if err != nil {
@@ -271,7 +271,7 @@ func TestCoreOrchestratorPreparesRequest(t *testing.T) {
 			{
 				ID: "msg_final", Status: "completed", StopReason: "end_turn",
 				Messages: []format.CoreMessage{{
-					Role: "assistant",
+					Role:    "assistant",
 					Content: []format.CoreContentBlock{{Type: "text", Text: "ok"}},
 				}},
 			},
@@ -367,7 +367,7 @@ func TestCoreOrchestratorMaxRounds(t *testing.T) {
 		}},
 	}
 	upstream := &fakeCoreUpstream{}
-	// Fill responses with enough tool_use responses to exceed maxRounds+1.
+	// Fill responses with enough tool_use responses to exceed maxRounds.
 	for i := 0; i < 10; i++ {
 		upstream.responses = append(upstream.responses, toolUseResp)
 	}
@@ -375,7 +375,7 @@ func TestCoreOrchestratorMaxRounds(t *testing.T) {
 	orchestrator := NewCoreOrchestrator(CoreOrchestratorConfig{
 		Upstream:  upstream,
 		Client:    vision,
-		MaxRounds: 1, // maxRounds=1 means 0,1,2 iterations → 3 calls, exceeds max 1
+		MaxRounds: 1, // maxRounds=1 means at most 1 iteration.
 	})
 
 	_, err := orchestrator.CreateCore(context.Background(), &format.CoreRequest{
@@ -383,6 +383,105 @@ func TestCoreOrchestratorMaxRounds(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "exceeded max rounds") {
 		t.Fatalf("expected max rounds error, got: %v", err)
+	}
+	if len(upstream.requests) != 1 {
+		t.Fatalf("upstream requests = %d, want 1", len(upstream.requests))
+	}
+}
+
+func TestCoreOrchestratorNilClient(t *testing.T) {
+	upstream := &fakeCoreUpstream{}
+	orchestrator := NewCoreOrchestrator(CoreOrchestratorConfig{
+		Upstream:  upstream,
+		Client:    nil,
+		MaxRounds: 2,
+	})
+
+	_, err := orchestrator.CreateCore(context.Background(), &format.CoreRequest{
+		Model: "test-model",
+	})
+	if err == nil || !strings.Contains(err.Error(), "visual client is nil") {
+		t.Fatalf("expected visual client error, got: %v", err)
+	}
+	if len(upstream.requests) != 0 {
+		t.Fatalf("upstream requests = %d, want 0", len(upstream.requests))
+	}
+}
+
+func TestCoreOrchestratorAggregatesUsageAcrossRounds(t *testing.T) {
+	upstream := &fakeCoreUpstream{
+		responses: []*format.CoreResponse{
+			{
+				ID: "msg_tool_1", Status: "completed", StopReason: "tool_use",
+				Messages: []format.CoreMessage{{
+					Role: "assistant",
+					Content: []format.CoreContentBlock{{
+						Type: "tool_use", ToolUseID: "toolu_1", ToolName: ToolVisualBrief,
+						ToolInput: json.RawMessage(`{"image_urls":["https://example.test/a.png"]}`),
+					}},
+				}},
+				Usage: format.CoreUsage{
+					InputTokens:       10,
+					OutputTokens:      4,
+					CachedInputTokens: 3,
+				},
+			},
+			{
+				ID: "msg_tool_2", Status: "completed", StopReason: "tool_use",
+				Messages: []format.CoreMessage{{
+					Role: "assistant",
+					Content: []format.CoreContentBlock{{
+						Type: "tool_use", ToolUseID: "toolu_2", ToolName: ToolVisualQA,
+						ToolInput: json.RawMessage(`{"question":"what color?"}`),
+					}},
+				}},
+				Usage: format.CoreUsage{
+					InputTokens:       8,
+					OutputTokens:      5,
+					CachedInputTokens: 2,
+				},
+			},
+			{
+				ID: "msg_final", Status: "completed", StopReason: "end_turn",
+				Messages: []format.CoreMessage{{
+					Role:    "assistant",
+					Content: []format.CoreContentBlock{{Type: "text", Text: "done"}},
+				}},
+				Usage: format.CoreUsage{
+					InputTokens:       6,
+					OutputTokens:      7,
+					CachedInputTokens: 1,
+				},
+			},
+		},
+	}
+	vision := &fakeCoreVisionClient{text: "visual result"}
+	orchestrator := NewCoreOrchestrator(CoreOrchestratorConfig{
+		Upstream:  upstream,
+		Client:    vision,
+		MaxRounds: 5,
+	})
+
+	resp, err := orchestrator.CreateCore(context.Background(), &format.CoreRequest{
+		Model: "test-model",
+	})
+	if err != nil {
+		t.Fatalf("CreateCore() error = %v", err)
+	}
+	if resp == nil {
+		t.Fatal("CreateCore() returned nil response")
+	}
+	if resp.Usage.InputTokens != 24 {
+		t.Fatalf("usage input_tokens = %d, want 24", resp.Usage.InputTokens)
+	}
+	if resp.Usage.OutputTokens != 16 {
+		t.Fatalf("usage output_tokens = %d, want 16", resp.Usage.OutputTokens)
+	}
+	if resp.Usage.CachedInputTokens != 6 {
+		t.Fatalf("usage cached_input_tokens = %d, want 6", resp.Usage.CachedInputTokens)
+	}
+	if resp.Usage.TotalTokens != 40 {
+		t.Fatalf("usage total_tokens = %d, want 40", resp.Usage.TotalTokens)
 	}
 }
 
@@ -590,7 +689,7 @@ func TestCoreOrchestrator_ImageStrippedAcrossMultipleTurns(t *testing.T) {
 			{
 				ID: "turn3", Status: "completed", StopReason: "end_turn",
 				Messages: []format.CoreMessage{{
-					Role: "assistant",
+					Role:    "assistant",
 					Content: []format.CoreContentBlock{{Type: "text", Text: "final answer"}},
 				}},
 			},
@@ -666,4 +765,3 @@ func TestCoreOrchestrator_ImageStrippedAcrossMultipleTurns(t *testing.T) {
 			placeholderCount, firstMsg.Content)
 	}
 }
-
