@@ -565,6 +565,18 @@ func (s *streamConverterState) convertEvent(events chan<- format.CoreStreamEvent
 				},
 			})
 
+		case "reasoning_content":
+			// DeepSeek anthropic-compatible API uses "reasoning_content" as the
+			// content-block type for reasoning, with the text in the .Text field.
+			s.emit(events, format.CoreStreamEvent{
+				Type:  format.CoreContentBlockStarted,
+				Index: index,
+				ContentBlock: &format.CoreContentBlock{
+					Type:          "reasoning",
+					ReasoningText: ev.ContentBlock.Text,
+				},
+			})
+
 		case "server_tool_use":
 			// Anthropic server-side tool usage marker. Do NOT forward — the tool_use
 			// would become an orphan in subsequent requests (no matching tool_result),
@@ -613,6 +625,18 @@ func (s *streamConverterState) convertEvent(events chan<- format.CoreStreamEvent
 				},
 			})
 
+		case ev.Delta.Type == "reasoning_content_delta" || blockType == "reasoning_content":
+			// DeepSeek streams reasoning content via delta.reasoning_content_delta
+			// (instead of delta.thinking_delta). The text is in ev.Delta.Text.
+			s.emit(events, format.CoreStreamEvent{
+				Type:  format.CoreTextDelta,
+				Index: index,
+				Delta: ev.Delta.Text,
+				ContentBlock: &format.CoreContentBlock{
+					Type: "reasoning",
+				},
+			})
+
 		case ev.Delta.Type == "signature_delta":
 			if sig := ev.Delta.Signature; sig != "" {
 				s.blockSignatures[index] = sig
@@ -629,7 +653,7 @@ func (s *streamConverterState) convertEvent(events chan<- format.CoreStreamEvent
 			break
 		}
 
-		if blockType == "thinking" {
+		if blockType == "thinking" || blockType == "reasoning_content" {
 			s.emit(events, format.CoreStreamEvent{
 				Type:  format.CoreContentBlockDone,
 				Index: index,
@@ -920,6 +944,14 @@ func (a *AnthropicProviderAdapter) fromContentBlock(b ContentBlock) format.CoreC
 			Type:               "reasoning",
 			ReasoningText:      b.Thinking,
 			ReasoningSignature: b.Signature,
+		}
+
+	case "reasoning_content":
+		// DeepSeek non-streaming responses may use "reasoning_content" as the
+		// content-block type with the text in the .Text field instead of .Thinking.
+		return format.CoreContentBlock{
+			Type:          "reasoning",
+			ReasoningText: b.Text,
 		}
 
 	default:
