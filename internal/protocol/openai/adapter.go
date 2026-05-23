@@ -1084,38 +1084,28 @@ func convertInput(raw json.RawMessage, model string) ([]format.CoreMessage, []fo
 
 	messages := make([]format.CoreMessage, 0, len(items))
 	system := make([]format.CoreContentBlock, 0)
-	var pendingReasoning []format.CoreContentBlock
-	var pendingFCBlocks []format.CoreContentBlock // batch consecutive function_calls
+	var pendingAssistant []format.CoreContentBlock
+
+	flushPendingAssistant := func() {
+		if len(pendingAssistant) == 0 {
+			return
+		}
+		flushed := make([]format.CoreContentBlock, len(pendingAssistant))
+		copy(flushed, pendingAssistant)
+		messages = append(messages, format.CoreMessage{
+			Role:    "assistant",
+			Content: flushed,
+		})
+		pendingAssistant = pendingAssistant[:0]
+	}
 
 	for _, item := range items {
 		if isToolCallOutputType(item.Type) {
-			// Keep any pending reasoning within the same assistant tool-call turn.
-			// Emitting a standalone assistant reasoning message here would break
-			// the required adjacency of assistant tool_use -> immediate tool_result.
-			if len(pendingFCBlocks) > 0 && len(pendingReasoning) > 0 {
-				pendingFCBlocks = mergeReasoningBeforeToolUse(pendingFCBlocks, pendingReasoning)
-				pendingReasoning = pendingReasoning[:0]
-			}
-			// Flush pending function_calls before tool results.
-			if len(pendingFCBlocks) > 0 {
-				flushed := make([]format.CoreContentBlock, len(pendingFCBlocks))
-				copy(flushed, pendingFCBlocks)
-				messages = append(messages, format.CoreMessage{
-					Role:    "assistant",
-					Content: flushed,
-				})
-				pendingFCBlocks = pendingFCBlocks[:0]
-			}
-			// Flush pending reasoning before tool results.
-			if len(pendingReasoning) > 0 {
-				flushedReasoning := make([]format.CoreContentBlock, len(pendingReasoning))
-				copy(flushedReasoning, pendingReasoning)
-				messages = append(messages, format.CoreMessage{
-					Role:    "assistant",
-					Content: flushedReasoning,
-				})
-				pendingReasoning = pendingReasoning[:0]
-			}
+			// Tool results must immediately follow the assistant turn containing
+			// the matching tool_use block. Keep any text/reasoning that preceded
+			// the tool call in the same assistant message instead of replaying it
+			// as a standalone assistant turn in later tool loops.
+			flushPendingAssistant()
 			// Each tool result → separate tool-role Core message.
 			messages = append(messages, format.CoreMessage{
 				Role: "tool",
@@ -1127,18 +1117,6 @@ func convertInput(raw json.RawMessage, model string) ([]format.CoreMessage, []fo
 			})
 			continue
 		}
-		// Flush pending function_calls before non-function-call items.
-		// Don't flush between consecutive function_call items — they should
-		// be batched into a single assistant message.
-		if !isToolCallInputType(item.Type) && item.Type != "reasoning" && len(pendingFCBlocks) > 0 {
-			flushed := make([]format.CoreContentBlock, len(pendingFCBlocks))
-			copy(flushed, pendingFCBlocks)
-			messages = append(messages, format.CoreMessage{
-				Role:    "assistant",
-				Content: flushed,
-			})
-			pendingFCBlocks = pendingFCBlocks[:0]
-		}
 
 		role := item.Role
 		if role == "" {
@@ -1148,11 +1126,11 @@ func convertInput(raw json.RawMessage, model string) ([]format.CoreMessage, []fo
 		// Handle reasoning input items — convert to thinking blocks for the next assistant message.
 		if item.Type == "reasoning" {
 			blocks := reasoningBlocksFromSummary(item.Summary)
-			if len(pendingFCBlocks) > 0 {
-				pendingFCBlocks = mergeReasoningBeforeToolUse(pendingFCBlocks, blocks)
+			if containsToolUse(pendingAssistant) {
+				pendingAssistant = mergeReasoningBeforeToolUse(pendingAssistant, blocks)
 				continue
 			}
-			pendingReasoning = append(pendingReasoning, blocks...)
+			pendingAssistant = append(pendingAssistant, blocks...)
 			continue
 		}
 
@@ -1165,8 +1143,8 @@ func convertInput(raw json.RawMessage, model string) ([]format.CoreMessage, []fo
 			// dummy reasoning block is injected if pendingReasoning is empty.
 			// A future fix should add a dummy reasoning block here when:
 			// (a) the model is a reasoning model, and (b) pendingReasoning is empty.
-			if len(pendingReasoning) == 0 && isReasoningModel(model) {
-				pendingReasoning = append(pendingReasoning, format.CoreContentBlock{
+			if !containsReasoning(pendingAssistant) && isReasoningModel(model) {
+				pendingAssistant = append(pendingAssistant, format.CoreContentBlock{
 					Type:          "reasoning",
 					ReasoningText: "",
 				})
@@ -1174,15 +1152,11 @@ func convertInput(raw json.RawMessage, model string) ([]format.CoreMessage, []fo
 
 			// function_call in input → tool_use assistant block.
 			// Collect into pendingFCBlocks to batch consecutive calls into a single assistant message.
-			if len(pendingReasoning) > 0 {
-				pendingFCBlocks = append(pendingFCBlocks, pendingReasoning...)
-				pendingReasoning = pendingReasoning[:0]
-			}
 			toolInput := json.RawMessage(item.Arguments)
 			if !json.Valid([]byte(item.Arguments)) {
 				toolInput = json.RawMessage(`{}`)
 			}
-			pendingFCBlocks = append(pendingFCBlocks, format.CoreContentBlock{
+			pendingAssistant = append(pendingAssistant, format.CoreContentBlock{
 				Type:      "tool_use",
 				ToolUseID: firstNonEmpty(item.CallID, item.ID),
 				ToolName:  item.Name,
@@ -1190,10 +1164,6 @@ func convertInput(raw json.RawMessage, model string) ([]format.CoreMessage, []fo
 			})
 
 		case item.Type == "custom_tool_call" || item.Type == "local_shell_call":
-			if len(pendingReasoning) > 0 {
-				pendingFCBlocks = append(pendingFCBlocks, pendingReasoning...)
-				pendingReasoning = pendingReasoning[:0]
-			}
 			toolInput := json.RawMessage(item.Arguments)
 			if !json.Valid([]byte(item.Arguments)) {
 				if item.Input != "" {
@@ -1206,7 +1176,7 @@ func convertInput(raw json.RawMessage, model string) ([]format.CoreMessage, []fo
 				data, _ := json.Marshal(item.Action)
 				toolInput = data
 			}
-			pendingFCBlocks = append(pendingFCBlocks, format.CoreContentBlock{
+			pendingAssistant = append(pendingAssistant, format.CoreContentBlock{
 				Type:      "tool_use",
 				ToolUseID: firstNonEmpty(item.CallID, item.ID),
 				ToolName:  item.Name,
@@ -1214,6 +1184,7 @@ func convertInput(raw json.RawMessage, model string) ([]format.CoreMessage, []fo
 			})
 
 		case role == "system" || role == "developer":
+			flushPendingAssistant()
 			blocks := contentBlocksFromRaw(item.Content)
 			if len(blocks) > 0 {
 				system = append(system, blocks...)
@@ -1221,20 +1192,12 @@ func convertInput(raw json.RawMessage, model string) ([]format.CoreMessage, []fo
 
 		case role == "assistant":
 			blocks := contentBlocksFromRaw(item.Content)
-			// Prepend any pending reasoning blocks (from previous reasoning input items)
-			// before the assistant message content.
-			if len(pendingReasoning) > 0 {
-				blocks = append(pendingReasoning, blocks...)
-				pendingReasoning = pendingReasoning[:0]
-			}
 			if len(blocks) > 0 {
-				messages = append(messages, format.CoreMessage{
-					Role:    "assistant",
-					Content: blocks,
-				})
+				pendingAssistant = append(pendingAssistant, blocks...)
 			}
 
 		default:
+			flushPendingAssistant()
 			blocks := contentBlocksFromRaw(item.Content)
 			if len(blocks) > 0 {
 				messages = append(messages, format.CoreMessage{
@@ -1245,23 +1208,7 @@ func convertInput(raw json.RawMessage, model string) ([]format.CoreMessage, []fo
 		}
 	}
 
-	// Flush remaining reasoning blocks (no following assistant message).
-	if len(pendingReasoning) > 0 {
-		messages = append(messages, format.CoreMessage{
-			Role:    "assistant",
-			Content: pendingReasoning,
-		})
-	}
-
-	// Flush any remaining batched function_calls.
-	if len(pendingFCBlocks) > 0 {
-		flushed := make([]format.CoreContentBlock, len(pendingFCBlocks))
-		copy(flushed, pendingFCBlocks)
-		messages = append(messages, format.CoreMessage{
-			Role:    "assistant",
-			Content: flushed,
-		})
-	}
+	flushPendingAssistant()
 
 	return messages, system, nil
 }
@@ -1473,6 +1420,24 @@ func mergeReasoningBeforeToolUse(blocks []format.CoreContentBlock, reasoning []f
 	merged = append(merged, reasoning...)
 	merged = append(merged, blocks[insertAt:]...)
 	return merged
+}
+
+func containsReasoning(blocks []format.CoreContentBlock) bool {
+	for _, block := range blocks {
+		if block.Type == "reasoning" {
+			return true
+		}
+	}
+	return false
+}
+
+func containsToolUse(blocks []format.CoreContentBlock) bool {
+	for _, block := range blocks {
+		if block.Type == "tool_use" {
+			return true
+		}
+	}
+	return false
 }
 
 func isToolCallInputType(itemType string) bool {

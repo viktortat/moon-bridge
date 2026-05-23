@@ -273,6 +273,46 @@ func TestToCoreRequest_ReasoningModelInjectsEmptyReasoningBeforeFunctionCall(t *
 	}
 }
 
+func TestToCoreRequest_KeepsAssistantTextWithFollowingToolUse(t *testing.T) {
+	adapter := openai.NewOpenAIAdapter(format.CorePluginHooks{})
+	req := &openai.ResponsesRequest{
+		Model: "deepseek-v4-pro",
+		Input: json.RawMessage(`[
+			{"type":"message","role":"assistant","content":[{"type":"output_text","text":"I will inspect the file."}]},
+			{"type":"function_call","id":"fc_1","call_id":"call_1","name":"exec_command","arguments":"{\"cmd\":\"pwd\"}"},
+			{"type":"function_call_output","call_id":"call_1","output":"ok"},
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"continue"}]}
+		]`),
+	}
+
+	result, err := adapter.ToCoreRequest(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Messages) != 3 {
+		t.Fatalf("messages len=%d, want 3; got %+v", len(result.Messages), result.Messages)
+	}
+	assistant := result.Messages[0]
+	if assistant.Role != "assistant" {
+		t.Fatalf("messages[0].Role=%q, want assistant", assistant.Role)
+	}
+	if len(assistant.Content) != 2 {
+		t.Fatalf("assistant content len=%d, want text + tool_use; got %+v", len(assistant.Content), assistant.Content)
+	}
+	if assistant.Content[0].Type != "text" || assistant.Content[0].Text != "I will inspect the file." {
+		t.Fatalf("assistant.Content[0]=%+v, want preserved text", assistant.Content[0])
+	}
+	if assistant.Content[1].Type != "tool_use" || assistant.Content[1].ToolUseID != "call_1" {
+		t.Fatalf("assistant.Content[1]=%+v, want tool_use call_1", assistant.Content[1])
+	}
+	if result.Messages[1].Role != "tool" || result.Messages[1].Content[0].ToolUseID != "call_1" {
+		t.Fatalf("messages[1]=%+v, want tool result call_1", result.Messages[1])
+	}
+	if result.Messages[2].Role != "user" || result.Messages[2].Content[0].Text != "continue" {
+		t.Fatalf("messages[2]=%+v, want user continue", result.Messages[2])
+	}
+}
+
 func TestToCoreRequest_KeepsToolUseAdjacentToToolResultWhenReasoningPrecedesOutput(t *testing.T) {
 	adapter := openai.NewOpenAIAdapter(format.CorePluginHooks{})
 	req := &openai.ResponsesRequest{
@@ -338,30 +378,29 @@ func TestToCoreRequest_BatchesCustomToolCallsAndOutputsIntoSingleRound(t *testin
 		t.Fatal(err)
 	}
 
-	if len(result.Messages) != 10 {
-		t.Fatalf("messages len=%d, want 10; got %+v", len(result.Messages), result.Messages)
-	}
-
-	if result.Messages[0].Role != "assistant" || len(result.Messages[0].Content) != 1 || result.Messages[0].Content[0].Text != "before tools" {
-		t.Fatalf("messages[0]=%+v, want pre-tool assistant text", result.Messages[0])
+	if len(result.Messages) != 7 {
+		t.Fatalf("messages len=%d, want 7; got %+v", len(result.Messages), result.Messages)
 	}
 
 	for i, want := range []struct {
-		assistantTextIdx int
-		msgIdx           int
-		callID           string
-		outcome          string
+		msgIdx  int
+		text    string
+		callID  string
+		outcome string
 	}{
-		{0, 1, "call_a", "ok a"},
-		{3, 4, "call_b", "ok b"},
-		{6, 7, "call_c", "ok c"},
+		{0, "before tools", "call_a", "ok a"},
+		{2, "between tools", "call_b", "ok b"},
+		{4, "between tools 2", "call_c", "ok c"},
 	} {
-		if result.Messages[want.assistantTextIdx].Role != "assistant" {
-			t.Fatalf("assistant commentary turn %d = %+v", i, result.Messages[want.assistantTextIdx])
-		}
 		assistant := result.Messages[want.msgIdx]
-		if assistant.Role != "assistant" || len(assistant.Content) != 1 || assistant.Content[0].Type != "tool_use" || assistant.Content[0].ToolUseID != want.callID {
+		if assistant.Role != "assistant" || len(assistant.Content) != 2 {
 			t.Fatalf("assistant tool turn %d = %+v", i, assistant)
+		}
+		if assistant.Content[0].Type != "text" || assistant.Content[0].Text != want.text {
+			t.Fatalf("assistant text turn %d = %+v, want %q", i, assistant.Content[0], want.text)
+		}
+		if assistant.Content[1].Type != "tool_use" || assistant.Content[1].ToolUseID != want.callID {
+			t.Fatalf("assistant tool turn %d content[1] = %+v, want tool_use %s", i, assistant.Content[1], want.callID)
 		}
 		toolResult := result.Messages[want.msgIdx+1]
 		if toolResult.Role != "tool" || len(toolResult.Content) != 1 || toolResult.Content[0].Type != "tool_result" || toolResult.Content[0].ToolUseID != want.callID {
@@ -372,8 +411,8 @@ func TestToCoreRequest_BatchesCustomToolCallsAndOutputsIntoSingleRound(t *testin
 		}
 	}
 
-	if result.Messages[9].Role != "assistant" || len(result.Messages[9].Content) != 1 || result.Messages[9].Content[0].Text != "after tools" {
-		t.Fatalf("messages[9]=%+v, want trailing assistant text", result.Messages[9])
+	if result.Messages[6].Role != "assistant" || len(result.Messages[6].Content) != 1 || result.Messages[6].Content[0].Text != "after tools" {
+		t.Fatalf("messages[6]=%+v, want trailing assistant text", result.Messages[6])
 	}
 }
 
