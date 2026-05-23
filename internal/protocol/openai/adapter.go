@@ -15,6 +15,8 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/google/uuid"
+
 	"moonbridge/internal/extension/codextool"
 	"moonbridge/internal/format"
 )
@@ -34,14 +36,14 @@ type OpenAIAdapter struct {
 	hooks format.CorePluginHooks
 
 	disablePatchProxy func(string) bool
-	streamMu     sync.Mutex
-	streamEvents []StreamEvent
+	streamMu          sync.Mutex
+	streamEvents      []StreamEvent
 }
 
 // NewOpenAIAdapter creates a new OpenAIAdapter with the given config and hooks.
 func NewOpenAIAdapter(hooks format.CorePluginHooks) *OpenAIAdapter {
 	return &OpenAIAdapter{
-		hooks: hooks.WithDefaults(),
+		hooks:             hooks.WithDefaults(),
 		disablePatchProxy: hooks.DisablePatchProxy,
 	}
 }
@@ -192,11 +194,12 @@ func (a *OpenAIAdapter) FromCoreResponse(ctx context.Context, resp *format.CoreR
 	a.hooks.PostProcessCoreResponse(ctx, resp)
 
 	response := &Response{
-		ID:     resp.ID,
+		ID:     responseIDOrSynthetic(resp.ID),
 		Object: "response",
 		Status: resp.Status,
 		Model:  resp.Model,
 	}
+	itemIDs := newResponseItemIDFactory(response.ID)
 
 	// Convert Messages → Output items.
 	var output []OutputItem
@@ -214,6 +217,7 @@ func (a *OpenAIAdapter) FromCoreResponse(ctx context.Context, resp *format.CoreR
 			case "reasoning":
 				output = append(output, OutputItem{
 					Type:   "reasoning",
+					ID:     itemIDs.next("rs"),
 					Status: "completed",
 					Summary: []ReasoningItemSummary{
 						{Type: "text", Text: block.ReasoningText, Signature: block.ReasoningSignature},
@@ -225,13 +229,18 @@ func (a *OpenAIAdapter) FromCoreResponse(ctx context.Context, resp *format.CoreR
 				if len(textParts) > 0 {
 					output = append(output, OutputItem{
 						Type:    "message",
+						ID:      itemIDs.next("msg"),
 						Status:  "completed",
 						Role:    "assistant",
 						Content: copyContentParts(textParts),
 					})
 					textParts = textParts[:0]
 				}
-				output = append(output, buildToolOutputItem(block, resp.Extensions))
+				callID := block.ToolUseID
+				if callID == "" {
+					callID = itemIDs.next("call")
+				}
+				output = append(output, buildToolOutputItem(block, resp.Extensions, itemIDs.next("fc"), callID))
 
 			case "tool_result":
 				// Tool results don't translate to output items in the response.
@@ -245,6 +254,7 @@ func (a *OpenAIAdapter) FromCoreResponse(ctx context.Context, resp *format.CoreR
 		if len(textParts) > 0 {
 			output = append(output, OutputItem{
 				Type:    "message",
+				ID:      itemIDs.next("msg"),
 				Status:  "completed",
 				Role:    "assistant",
 				Content: copyContentParts(textParts),
@@ -362,9 +372,11 @@ func (a *OpenAIAdapter) streamLoop(ctx context.Context, coreReq *format.CoreRequ
 
 	// State tracked during streaming.
 	var response = &Response{
+		ID:     responseIDOrSynthetic(""),
 		Object: "response",
 		Status: "in_progress",
 	}
+	itemIDFactory := newResponseItemIDFactory(response.ID)
 	contentText := make(map[int]string)
 	toolCallArgs := make(map[int]string)
 	toolBlockNames := make(map[int]string)
@@ -372,6 +384,7 @@ func (a *OpenAIAdapter) streamLoop(ctx context.Context, coreReq *format.CoreRequ
 	itemIDs := make(map[int]string)
 	reasonIndexes := make(map[int]bool)
 	toolCallFinalized := make(map[int]bool)
+	inProgressSent := false
 
 	for event := range events {
 		// Let hooks skip events.
@@ -387,6 +400,7 @@ func (a *OpenAIAdapter) streamLoop(ctx context.Context, coreReq *format.CoreRequ
 			// Use ItemID as the response ID if set; otherwise keep the current one.
 			if event.ItemID != "" {
 				response.ID = event.ItemID
+				itemIDFactory = newResponseItemIDFactory(response.ID)
 			}
 			response.Status = "in_progress"
 
@@ -398,12 +412,26 @@ func (a *OpenAIAdapter) streamLoop(ctx context.Context, coreReq *format.CoreRequ
 					Response:       cloneResponse(response),
 				},
 			})
+			if !inProgressSent {
+				send(StreamEvent{
+					Event: "response.in_progress",
+					Data: ResponseLifecycleEvent{
+						Type:           "response.in_progress",
+						SequenceNumber: next(),
+						Response:       cloneResponse(response),
+					},
+				})
+				inProgressSent = true
+			}
 
 		// ==================================================================
 		// Lifecycle: in_progress
 		// ==================================================================
 		case format.CoreEventInProgress:
 			response.Status = "in_progress"
+			if inProgressSent {
+				break
+			}
 			send(StreamEvent{
 				Event: "response.in_progress",
 				Data: ResponseLifecycleEvent{
@@ -412,6 +440,7 @@ func (a *OpenAIAdapter) streamLoop(ctx context.Context, coreReq *format.CoreRequ
 					Response:       cloneResponse(response),
 				},
 			})
+			inProgressSent = true
 
 		// ==================================================================
 		// Content block started
@@ -424,12 +453,12 @@ func (a *OpenAIAdapter) streamLoop(ctx context.Context, coreReq *format.CoreRequ
 
 			switch event.ContentBlock.Type {
 			case "text":
-				id := fmt.Sprintf("msg_item_%d", index)
+				id := itemIDFactory.next("msg")
 				itemIDs[index] = id
 				contentText[index] = ""
 
 			case "reasoning":
-				id := fmt.Sprintf("rs_item_%d", index)
+				id := itemIDFactory.next("rs")
 				itemIDs[index] = id
 				contentText[index] = ""
 				reasonIndexes[index] = true
@@ -458,17 +487,18 @@ func (a *OpenAIAdapter) streamLoop(ctx context.Context, coreReq *format.CoreRequ
 						ItemID:         id,
 						OutputIndex:    io,
 						SummaryIndex:   0,
+						Part:           ReasoningItemSummary{Type: "summary_text"},
 					},
 				})
 				contentText[index] = ""
 			case "tool_use":
 				toolUseID := event.ContentBlock.ToolUseID
 				if toolUseID == "" {
-					toolUseID = fmt.Sprintf("call_%d", index)
+					toolUseID = itemIDFactory.next("call")
 				}
-				itemIDs[index] = fmt.Sprintf("fc_item_%d", index)
+				itemIDs[index] = itemIDFactory.next("fc")
 				toolBlockNames[index] = event.ContentBlock.ToolName
-				item := buildToolOutputItemStreaming(event.ContentBlock, coreReq.Extensions, toolUseID)
+				item := buildToolOutputItemStreaming(event.ContentBlock, coreReq.Extensions, itemIDs[index], toolUseID)
 				outputIndexes[index] = len(response.Output)
 				response.Output = append(response.Output, item)
 				send(StreamEvent{
@@ -509,7 +539,7 @@ func (a *OpenAIAdapter) streamLoop(ctx context.Context, coreReq *format.CoreRequ
 			if _, exists := outputIndexes[index]; !exists {
 				id, ok := itemIDs[index]
 				if !ok {
-					id = fmt.Sprintf("msg_item_%d", index)
+					id = itemIDFactory.next("msg")
 					itemIDs[index] = id
 				}
 				item := OutputItem{
@@ -567,7 +597,7 @@ func (a *OpenAIAdapter) streamLoop(ctx context.Context, coreReq *format.CoreRequ
 			if _, hasOutput := outputIndexes[index]; !hasOutput {
 				id := itemIDs[index]
 				if id == "" {
-					id = fmt.Sprintf("msg_item_%d", index)
+					id = itemIDFactory.next("msg")
 					itemIDs[index] = id
 				}
 				outputIndexes[index] = len(response.Output)
@@ -613,19 +643,34 @@ func (a *OpenAIAdapter) streamLoop(ctx context.Context, coreReq *format.CoreRequ
 				},
 			})
 
-		// ==================================================================
-		// Tool call arguments delta
-		// ==================================================================
+			// ==================================================================
+			// Tool call arguments delta
+			// ==================================================================
 		case format.CoreToolCallArgsDelta:
 			index := event.Index
 			toolCallArgs[index] += event.Delta
+			outputIndex := outputIndexes[index]
+			if outputIndex < len(response.Output) && response.Output[outputIndex].Type == "custom_tool_call" {
+				send(StreamEvent{
+					Event: "response.custom_tool_call_input.delta",
+					Data: CustomToolCallInputDeltaEvent{
+						Type:           "response.custom_tool_call_input.delta",
+						SequenceNumber: next(),
+						ItemID:         itemIDs[index],
+						CallID:         response.Output[outputIndex].CallID,
+						OutputIndex:    outputIndex,
+						Delta:          event.Delta,
+					},
+				})
+				break
+			}
 			send(StreamEvent{
 				Event: "response.function_call_arguments.delta",
 				Data: FunctionCallArgumentsDeltaEvent{
 					Type:           "response.function_call_arguments.delta",
 					SequenceNumber: next(),
 					ItemID:         itemIDs[index],
-					OutputIndex:    outputIndexes[index],
+					OutputIndex:    outputIndex,
 					Delta:          event.Delta,
 				},
 			})
@@ -652,23 +697,38 @@ func (a *OpenAIAdapter) streamLoop(ctx context.Context, coreReq *format.CoreRequ
 				}
 			}
 			toolCallFinalized[index] = true
-			send(StreamEvent{
-				Event: "response.function_call_arguments.done",
-				Data: FunctionCallArgumentsDoneEvent{
-					Type:           "response.function_call_arguments.done",
-					SequenceNumber: next(),
-					ItemID:         itemIDs[index],
-					OutputIndex:    outputIndexes[index],
-					Arguments:      finalArgs,
-				},
-			})
+			outputIndex := outputIndexes[index]
+			if outputIndex < len(response.Output) && response.Output[outputIndex].Type == "custom_tool_call" {
+				send(StreamEvent{
+					Event: "response.custom_tool_call_input.done",
+					Data: CustomToolCallInputDoneEvent{
+						Type:           "response.custom_tool_call_input.done",
+						SequenceNumber: next(),
+						ItemID:         itemIDs[index],
+						CallID:         response.Output[outputIndex].CallID,
+						OutputIndex:    outputIndex,
+						Input:          response.Output[outputIndex].Input,
+					},
+				})
+			} else {
+				send(StreamEvent{
+					Event: "response.function_call_arguments.done",
+					Data: FunctionCallArgumentsDoneEvent{
+						Type:           "response.function_call_arguments.done",
+						SequenceNumber: next(),
+						ItemID:         itemIDs[index],
+						OutputIndex:    outputIndex,
+						Arguments:      finalArgs,
+					},
+				})
+			}
 			send(StreamEvent{
 				Event: "response.output_item.done",
 				Data: OutputItemEvent{
 					Type:           "response.output_item.done",
 					SequenceNumber: next(),
-					OutputIndex:    outputIndexes[index],
-					Item:           response.Output[outputIndexes[index]],
+					OutputIndex:    outputIndex,
+					Item:           response.Output[outputIndex],
 				},
 			})
 
@@ -743,36 +803,59 @@ func (a *OpenAIAdapter) streamLoop(ctx context.Context, coreReq *format.CoreRequ
 				},
 			})
 
-		// ==================================================================
-		// Content block done
-		// ==================================================================
+			// ==================================================================
+			// Content block done
+			// ==================================================================
 		case format.CoreContentBlockDone:
 			index := event.Index
 
-			// Reasoning block done — emit reasoning summary part done.
+			// Reasoning block done — close the summary text, summary part, and item.
 			if reasonIndexes[index] {
+				outputIndex := outputIndexes[index]
+				summary := ReasoningItemSummary{
+					Type: "summary_text",
+					Text: contentText[index],
+				}
 				if idx, ok := outputIndexes[index]; ok && idx < len(response.Output) {
 					response.Output[idx].Status = "completed"
-					sig := ""
 					if event.ContentBlock != nil {
-						sig = event.ContentBlock.ReasoningSignature
+						summary.Signature = event.ContentBlock.ReasoningSignature
 					}
-					response.Output[idx].Summary = []ReasoningItemSummary{{
-						Type:      "text",
-						Text:      contentText[index],
-						Signature: sig,
-					}}
+					response.Output[idx].Summary = []ReasoningItemSummary{summary}
 				}
+				send(StreamEvent{
+					Event: "response.reasoning_summary_text.done",
+					Data: ReasoningSummaryTextDoneEvent{
+						Type:           "response.reasoning_summary_text.done",
+						SequenceNumber: next(),
+						ItemID:         itemIDs[index],
+						OutputIndex:    outputIndex,
+						SummaryIndex:   0,
+						Text:           contentText[index],
+					},
+				})
 				send(StreamEvent{
 					Event: "response.reasoning_summary_part.done",
 					Data: ReasoningSummaryPartDoneEvent{
 						Type:           "response.reasoning_summary_part.done",
 						SequenceNumber: next(),
 						ItemID:         itemIDs[index],
-						OutputIndex:    outputIndexes[index],
+						OutputIndex:    outputIndex,
 						SummaryIndex:   0,
+						Part:           summary,
 					},
 				})
+				if outputIndex < len(response.Output) {
+					send(StreamEvent{
+						Event: "response.output_item.done",
+						Data: OutputItemEvent{
+							Type:           "response.output_item.done",
+							SequenceNumber: next(),
+							OutputIndex:    outputIndex,
+							Item:           response.Output[outputIndex],
+						},
+					})
+				}
 				delete(contentText, index)
 				delete(itemIDs, index)
 				delete(outputIndexes, index)
@@ -785,7 +868,7 @@ func (a *OpenAIAdapter) streamLoop(ctx context.Context, coreReq *format.CoreRequ
 				// Ensure output item exists (may not be created if no deltas arrived).
 				if _, hasOutput := outputIndexes[index]; !hasOutput {
 					if itemID == "" {
-						itemID = fmt.Sprintf("msg_item_%d", index)
+						itemID = itemIDFactory.next("msg")
 						itemIDs[index] = itemID
 					}
 					outputIndexes[index] = len(response.Output)
@@ -872,17 +955,31 @@ func (a *OpenAIAdapter) streamLoop(ctx context.Context, coreReq *format.CoreRequ
 					}
 				}
 
-				// function_call_arguments.done
-				send(StreamEvent{
-					Event: "response.function_call_arguments.done",
-					Data: FunctionCallArgumentsDoneEvent{
-						Type:           "response.function_call_arguments.done",
-						SequenceNumber: next(),
-						ItemID:         itemID,
-						OutputIndex:    outputIndex,
-						Arguments:      finalArgs,
-					},
-				})
+				if outputIndex < len(response.Output) && response.Output[outputIndex].Type == "custom_tool_call" {
+					send(StreamEvent{
+						Event: "response.custom_tool_call_input.done",
+						Data: CustomToolCallInputDoneEvent{
+							Type:           "response.custom_tool_call_input.done",
+							SequenceNumber: next(),
+							ItemID:         itemID,
+							CallID:         response.Output[outputIndex].CallID,
+							OutputIndex:    outputIndex,
+							Input:          response.Output[outputIndex].Input,
+						},
+					})
+				} else {
+					// function_call_arguments.done
+					send(StreamEvent{
+						Event: "response.function_call_arguments.done",
+						Data: FunctionCallArgumentsDoneEvent{
+							Type:           "response.function_call_arguments.done",
+							SequenceNumber: next(),
+							ItemID:         itemID,
+							OutputIndex:    outputIndex,
+							Arguments:      finalArgs,
+						},
+					})
+				}
 
 				// output_item.done
 				send(StreamEvent{
@@ -1415,6 +1512,42 @@ func isReasoningModel(model string) bool {
 		strings.Contains(m, "reasoning")
 }
 
+type responseItemIDFactory struct {
+	suffix   string
+	counters map[string]int
+}
+
+func responseIDOrSynthetic(id string) string {
+	if id != "" {
+		return id
+	}
+	return "resp_" + compactUUID()
+}
+
+func newResponseItemIDFactory(responseID string) *responseItemIDFactory {
+	suffix := strings.TrimPrefix(responseID, "resp_")
+	if suffix == "" {
+		suffix = compactUUID()
+	}
+	return &responseItemIDFactory{
+		suffix:   suffix,
+		counters: make(map[string]int),
+	}
+}
+
+func (f *responseItemIDFactory) next(prefix string) string {
+	if f == nil {
+		return prefix + "_" + compactUUID()
+	}
+	n := f.counters[prefix]
+	f.counters[prefix] = n + 1
+	return fmt.Sprintf("%s_%s_%d", prefix, f.suffix, n)
+}
+
+func compactUUID() string {
+	return strings.ReplaceAll(uuid.NewString(), "-", "")
+}
+
 // toolInputString converts a json.RawMessage tool input to a string,
 // defaulting to "{}" when the input is nil or null.
 func toolInputString(input json.RawMessage) string {
@@ -1465,22 +1598,22 @@ func localShellActionFromRaw(raw json.RawMessage) *ToolAction {
 
 // buildToolOutputItem constructs an OutputItem using the codex_tool_map
 // to determine the correct output item type (function_call, custom_tool_call, local_shell_call).
-func buildToolOutputItem(block format.CoreContentBlock, extensions map[string]any) OutputItem {
+func buildToolOutputItem(block format.CoreContentBlock, extensions map[string]any, itemID, callID string) OutputItem {
 	toolMap := codextool.DecodeToolMapFromExtensions(extensions)
 	itemT, itemN, itemNS, itemInput, isLS, actionJSON := codextool.OutputItemFromBlock(block.ToolName, block.ToolInput, toolMap)
 	if isLS {
 		return OutputItem{
 			Type:   "local_shell_call",
-			ID:     block.ToolUseID,
-			CallID: block.ToolUseID,
+			ID:     itemID,
+			CallID: callID,
 			Status: "completed",
 			Action: localShellActionFromRaw(actionJSON),
 		}
 	}
 	return OutputItem{
 		Type:      itemT,
-		ID:        block.ToolUseID,
-		CallID:    block.ToolUseID,
+		ID:        itemID,
+		CallID:    callID,
 		Name:      itemN,
 		Namespace: itemNS,
 		Arguments: toolInputString(block.ToolInput),
@@ -1491,23 +1624,23 @@ func buildToolOutputItem(block format.CoreContentBlock, extensions map[string]an
 
 // buildToolOutputItemStreaming constructs a streaming OutputItem for a tool_use content block start.
 // The item is created with "in_progress" status.
-func buildToolOutputItemStreaming(block *format.CoreContentBlock, extensions map[string]any, toolUseID string) OutputItem {
+func buildToolOutputItemStreaming(block *format.CoreContentBlock, extensions map[string]any, itemID, callID string) OutputItem {
 	toolMap := codextool.DecodeToolMapFromExtensions(extensions)
 	itemT, itemN, itemNS, itemInput, isLS, actionJSON := codextool.OutputItemFromBlock(block.ToolName, block.ToolInput, toolMap)
 	_ = itemInput
 	if isLS {
 		return OutputItem{
 			Type:   "local_shell_call",
-			ID:     toolUseID,
-			CallID: toolUseID,
+			ID:     itemID,
+			CallID: callID,
 			Status: "in_progress",
 			Action: localShellActionFromRaw(actionJSON),
 		}
 	}
 	return OutputItem{
 		Type:      itemT,
-		ID:        toolUseID,
-		CallID:    toolUseID,
+		ID:        itemID,
+		CallID:    callID,
 		Name:      itemN,
 		Namespace: itemNS,
 		Arguments: toolInputString(block.ToolInput),

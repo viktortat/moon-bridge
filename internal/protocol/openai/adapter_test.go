@@ -3,9 +3,11 @@ package openai_test
 import (
 	"context"
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 
+	"moonbridge/internal/extension/codextool"
 	"moonbridge/internal/format"
 	"moonbridge/internal/protocol/openai"
 )
@@ -151,6 +153,59 @@ func TestFromCoreResponse_Basic(t *testing.T) {
 	if resp.Status != "completed" {
 		t.Errorf("Status = %q", resp.Status)
 	}
+	if len(resp.Output) != 1 {
+		t.Fatalf("Output len=%d, want 1", len(resp.Output))
+	}
+	if !strings.HasPrefix(resp.Output[0].ID, "msg_123_") {
+		t.Fatalf("message output id = %q, want msg_123_*", resp.Output[0].ID)
+	}
+}
+
+func TestFromCoreResponse_SynthesizesStableResponseStyleIDs(t *testing.T) {
+	adapter := openai.NewOpenAIAdapter(format.CorePluginHooks{})
+
+	coreResp := &format.CoreResponse{
+		Status: "completed",
+		Model:  "deepseek-v4-pro",
+		Messages: []format.CoreMessage{
+			{Role: "assistant", Content: []format.CoreContentBlock{
+				{Type: "reasoning", ReasoningText: "think"},
+				{Type: "text", Text: "before"},
+				{Type: "tool_use", ToolUseID: "call_1", ToolName: "exec_command", ToolInput: json.RawMessage(`{"cmd":"pwd"}`)},
+				{Type: "text", Text: "after"},
+			}},
+		},
+	}
+
+	result, err := adapter.FromCoreResponse(context.Background(), coreResp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp := result.(*openai.Response)
+
+	if !strings.HasPrefix(resp.ID, "resp_") {
+		t.Fatalf("response id = %q, want resp_*", resp.ID)
+	}
+	if len(resp.Output) != 4 {
+		t.Fatalf("Output len=%d, want 4: %+v", len(resp.Output), resp.Output)
+	}
+	wantPrefixes := []string{"rs_", "msg_", "fc_", "msg_"}
+	seen := make(map[string]bool)
+	for i, item := range resp.Output {
+		if !strings.HasPrefix(item.ID, wantPrefixes[i]) {
+			t.Fatalf("output[%d].ID = %q, want prefix %q", i, item.ID, wantPrefixes[i])
+		}
+		if seen[item.ID] {
+			t.Fatalf("duplicate output id %q in %+v", item.ID, resp.Output)
+		}
+		seen[item.ID] = true
+	}
+	if resp.Output[2].CallID != "call_1" {
+		t.Fatalf("tool call_id = %q, want call_1", resp.Output[2].CallID)
+	}
+	if resp.Output[2].ID == resp.Output[2].CallID {
+		t.Fatalf("tool item id should differ from call_id: %+v", resp.Output[2])
+	}
 }
 
 func TestFromCoreResponse_Error(t *testing.T) {
@@ -294,8 +349,8 @@ func TestToCoreRequest_BatchesCustomToolCallsAndOutputsIntoSingleRound(t *testin
 	for i, want := range []struct {
 		assistantTextIdx int
 		msgIdx           int
-		callID  string
-		outcome string
+		callID           string
+		outcome          string
 	}{
 		{0, 1, "call_a", "ok a"},
 		{3, 4, "call_b", "ok b"},
@@ -348,7 +403,34 @@ func TestFromCoreStream_NoDuplicateDoneForToolUse(t *testing.T) {
 	stream := streamAny.(<-chan openai.StreamEvent)
 	var argsDone int
 	var itemDone int
+	var toolItemID string
 	for ev := range stream {
+		switch ev.Event {
+		case "response.output_item.added":
+			data := ev.Data.(openai.OutputItemEvent)
+			if data.Item.Type == "function_call" {
+				toolItemID = data.Item.ID
+				if !strings.HasPrefix(toolItemID, "fc_") {
+					t.Fatalf("tool item id = %q, want fc_*", toolItemID)
+				}
+				if data.Item.CallID != "call_1" {
+					t.Fatalf("tool call_id = %q, want call_1", data.Item.CallID)
+				}
+				if data.Item.ID == data.Item.CallID {
+					t.Fatalf("tool item id should differ from call_id: %+v", data.Item)
+				}
+			}
+		case "response.function_call_arguments.delta":
+			data := ev.Data.(openai.FunctionCallArgumentsDeltaEvent)
+			if data.ItemID != toolItemID {
+				t.Fatalf("args delta item_id = %q, want %q", data.ItemID, toolItemID)
+			}
+		case "response.function_call_arguments.done":
+			data := ev.Data.(openai.FunctionCallArgumentsDoneEvent)
+			if data.ItemID != toolItemID {
+				t.Fatalf("args done item_id = %q, want %q", data.ItemID, toolItemID)
+			}
+		}
 		if ev.Event == "response.function_call_arguments.done" {
 			argsDone++
 		}
@@ -363,5 +445,350 @@ func TestFromCoreStream_NoDuplicateDoneForToolUse(t *testing.T) {
 	}
 	if itemDone != 1 {
 		t.Fatalf("output_item.done (tool) count=%d, want 1", itemDone)
+	}
+}
+
+func TestFromCoreStream_ReasoningSummaryLifecycle(t *testing.T) {
+	adapter := openai.NewOpenAIAdapter(format.CorePluginHooks{})
+	coreReq := &format.CoreRequest{Model: "deepseek-v4"}
+	evCh := make(chan format.CoreStreamEvent, 8)
+	evCh <- format.CoreStreamEvent{
+		Type:  format.CoreContentBlockStarted,
+		Index: 1,
+		ContentBlock: &format.CoreContentBlock{
+			Type: "reasoning",
+		},
+	}
+	evCh <- format.CoreStreamEvent{Type: format.CoreTextDelta, Index: 1, Delta: "thinking"}
+	evCh <- format.CoreStreamEvent{
+		Type:  format.CoreContentBlockDone,
+		Index: 1,
+		ContentBlock: &format.CoreContentBlock{
+			Type:               "reasoning",
+			ReasoningSignature: "sig-1",
+		},
+	}
+	evCh <- format.CoreStreamEvent{Type: format.CoreEventCompleted, Status: "completed"}
+	close(evCh)
+
+	streamAny, err := adapter.FromCoreStream(context.Background(), coreReq, evCh)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var events []string
+	var addedPart openai.ReasoningSummaryPartAddedEvent
+	var textDone openai.ReasoningSummaryTextDoneEvent
+	var partDone openai.ReasoningSummaryPartDoneEvent
+	var itemDone openai.OutputItemEvent
+	for ev := range streamAny.(<-chan openai.StreamEvent) {
+		events = append(events, ev.Event)
+		switch ev.Event {
+		case "response.reasoning_summary_part.added":
+			addedPart = ev.Data.(openai.ReasoningSummaryPartAddedEvent)
+		case "response.reasoning_summary_text.done":
+			textDone = ev.Data.(openai.ReasoningSummaryTextDoneEvent)
+		case "response.reasoning_summary_part.done":
+			partDone = ev.Data.(openai.ReasoningSummaryPartDoneEvent)
+		case "response.output_item.done":
+			if data := ev.Data.(openai.OutputItemEvent); data.Item.Type == "reasoning" {
+				itemDone = data
+			}
+		}
+	}
+
+	want := []string{
+		"response.output_item.added",
+		"response.reasoning_summary_part.added",
+		"response.reasoning_summary_text.delta",
+		"response.reasoning_summary_text.done",
+		"response.reasoning_summary_part.done",
+		"response.output_item.done",
+		"response.completed",
+	}
+	if !reflect.DeepEqual(events, want) {
+		t.Fatalf("events = %#v, want %#v", events, want)
+	}
+	if addedPart.Part.Type != "summary_text" {
+		t.Fatalf("added part = %+v, want summary_text", addedPart.Part)
+	}
+	if textDone.Text != "thinking" {
+		t.Fatalf("text done = %q, want thinking", textDone.Text)
+	}
+	if partDone.Part.Type != "summary_text" || partDone.Part.Text != "thinking" || partDone.Part.Signature != "sig-1" {
+		t.Fatalf("part done = %+v, want completed reasoning part", partDone.Part)
+	}
+	if itemDone.Item.Status != "completed" || len(itemDone.Item.Summary) != 1 || itemDone.Item.Summary[0].Text != "thinking" {
+		t.Fatalf("item done = %+v, want completed reasoning item", itemDone.Item)
+	}
+}
+
+func TestFromCoreStream_CustomToolUsesCustomInputEvents(t *testing.T) {
+	adapter := openai.NewOpenAIAdapter(format.CorePluginHooks{})
+	coreReq := &format.CoreRequest{
+		Model: "deepseek-v4",
+		Extensions: map[string]any{
+			"codex_tool_map": codextool.ToolMap{
+				"apply_patch": {
+					Kind:       codextool.ToolRaw,
+					OpenAIName: "apply_patch",
+				},
+			}.Encode(),
+		},
+	}
+	evCh := make(chan format.CoreStreamEvent, 8)
+	evCh <- format.CoreStreamEvent{
+		Type:  format.CoreContentBlockStarted,
+		Index: 2,
+		ContentBlock: &format.CoreContentBlock{
+			Type:      "tool_use",
+			ToolUseID: "call_patch",
+			ToolName:  "apply_patch",
+		},
+	}
+	evCh <- format.CoreStreamEvent{Type: format.CoreToolCallArgsDelta, Index: 2, Delta: `{"input":"*** Begin Patch\n*** End Patch"}`}
+	evCh <- format.CoreStreamEvent{Type: format.CoreContentBlockDone, Index: 2}
+	evCh <- format.CoreStreamEvent{Type: format.CoreEventCompleted, Status: "completed"}
+	close(evCh)
+
+	streamAny, err := adapter.FromCoreStream(context.Background(), coreReq, evCh)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var customDelta int
+	var customDone int
+	var functionArgsDone int
+	for ev := range streamAny.(<-chan openai.StreamEvent) {
+		switch ev.Event {
+		case "response.custom_tool_call_input.delta":
+			customDelta++
+			data := ev.Data.(openai.CustomToolCallInputDeltaEvent)
+			if data.CallID != "call_patch" || data.Delta == "" {
+				t.Fatalf("custom delta = %+v", data)
+			}
+		case "response.custom_tool_call_input.done":
+			customDone++
+			data := ev.Data.(openai.CustomToolCallInputDoneEvent)
+			if data.CallID != "call_patch" || data.Input != "*** Begin Patch\n*** End Patch" {
+				t.Fatalf("custom done = %+v", data)
+			}
+		case "response.function_call_arguments.done":
+			functionArgsDone++
+		}
+	}
+	if customDelta != 1 {
+		t.Fatalf("custom_tool_call_input.delta count=%d, want 1", customDelta)
+	}
+	if customDone != 1 {
+		t.Fatalf("custom_tool_call_input.done count=%d, want 1", customDone)
+	}
+	if functionArgsDone != 0 {
+		t.Fatalf("function_call_arguments.done count=%d, want 0", functionArgsDone)
+	}
+}
+
+func TestFromCoreStream_InterleavedTextAndToolsLifecycle(t *testing.T) {
+	adapter := openai.NewOpenAIAdapter(format.CorePluginHooks{})
+	coreReq := &format.CoreRequest{
+		Model: "deepseek-v4-pro",
+		Extensions: map[string]any{
+			"codex_tool_map": codextool.ToolMap{
+				"apply_patch": {
+					Kind:       codextool.ToolRaw,
+					OpenAIName: "apply_patch",
+				},
+			}.Encode(),
+		},
+	}
+
+	// Simulate DeepSeek stream: thinking → text → tool_use → text
+	evCh := make(chan format.CoreStreamEvent, 20)
+	evCh <- format.CoreStreamEvent{Type: format.CoreEventCreated, Status: "in_progress", Model: "deepseek-v4-pro"}
+
+	// 1. thinking / reasoning_content block
+	evCh <- format.CoreStreamEvent{
+		Type:  format.CoreContentBlockStarted,
+		Index: 0,
+		ContentBlock: &format.CoreContentBlock{
+			Type:          "reasoning",
+			ReasoningText: "I need to check the code first.",
+		},
+	}
+	evCh <- format.CoreStreamEvent{Type: format.CoreTextDelta, Index: 0, Delta: "I need to check the code first."}
+	evCh <- format.CoreStreamEvent{
+		Type:  format.CoreContentBlockDone,
+		Index: 0,
+		ContentBlock: &format.CoreContentBlock{
+			Type:               "reasoning",
+			ReasoningSignature: "deepseek-sig-abc",
+		},
+	}
+
+	// 2. first text block
+	evCh <- format.CoreStreamEvent{
+		Type:  format.CoreContentBlockStarted,
+		Index: 1,
+		ContentBlock: &format.CoreContentBlock{
+			Type: "text",
+		},
+	}
+	evCh <- format.CoreStreamEvent{Type: format.CoreTextDelta, Index: 1, Delta: "Let me read the file."}
+	evCh <- format.CoreStreamEvent{Type: format.CoreContentBlockDone, Index: 1}
+
+	// 3. tool_use block
+	evCh <- format.CoreStreamEvent{
+		Type:  format.CoreContentBlockStarted,
+		Index: 2,
+		ContentBlock: &format.CoreContentBlock{
+			Type:      "tool_use",
+			ToolUseID: "call_patch",
+			ToolName:  "apply_patch",
+		},
+	}
+	evCh <- format.CoreStreamEvent{Type: format.CoreToolCallArgsDelta, Index: 2, Delta: `{"input":"*** Begin Patch\n*** End Patch"}`}
+	evCh <- format.CoreStreamEvent{Type: format.CoreContentBlockDone, Index: 2}
+
+	// 4. second text block
+	evCh <- format.CoreStreamEvent{
+		Type:  format.CoreContentBlockStarted,
+		Index: 3,
+		ContentBlock: &format.CoreContentBlock{
+			Type: "text",
+		},
+	}
+	evCh <- format.CoreStreamEvent{Type: format.CoreTextDelta, Index: 3, Delta: "The change looks correct."}
+	evCh <- format.CoreStreamEvent{Type: format.CoreContentBlockDone, Index: 3}
+
+	evCh <- format.CoreStreamEvent{Type: format.CoreEventCompleted, Status: "completed"}
+	close(evCh)
+
+	streamAny, err := adapter.FromCoreStream(context.Background(), coreReq, evCh)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var events []string
+	var completed *openai.ResponseLifecycleEvent
+	var responseCreated *openai.ResponseLifecycleEvent
+	var responseInProgress *openai.ResponseLifecycleEvent
+	var customToolID string
+	for ev := range streamAny.(<-chan openai.StreamEvent) {
+		events = append(events, ev.Event)
+		switch ev.Event {
+		case "response.created":
+			data := ev.Data.(openai.ResponseLifecycleEvent)
+			responseCreated = &data
+		case "response.in_progress":
+			data := ev.Data.(openai.ResponseLifecycleEvent)
+			responseInProgress = &data
+		case "response.custom_tool_call_input.delta":
+			data := ev.Data.(openai.CustomToolCallInputDeltaEvent)
+			if data.CallID != "call_patch" {
+				t.Fatalf("custom delta call_id = %q, want call_patch", data.CallID)
+			}
+			if !strings.HasPrefix(data.ItemID, "fc_") {
+				t.Fatalf("custom delta item_id = %q, want fc_*", data.ItemID)
+			}
+			customToolID = data.ItemID
+		case "response.custom_tool_call_input.done":
+			data := ev.Data.(openai.CustomToolCallInputDoneEvent)
+			if data.CallID != "call_patch" {
+				t.Fatalf("custom done call_id = %q, want call_patch", data.CallID)
+			}
+			if data.ItemID != customToolID {
+				t.Fatalf("custom done item_id = %q, want %q", data.ItemID, customToolID)
+			}
+		case "response.completed":
+			data := ev.Data.(openai.ResponseLifecycleEvent)
+			completed = &data
+		}
+	}
+
+	// Verify event order follows the expected interleaved lifecycle.
+	wantOrder := []string{
+		"response.created",
+		"response.in_progress",
+		"response.output_item.added", // reasoning
+		"response.reasoning_summary_part.added",
+		"response.reasoning_summary_text.delta",
+		"response.reasoning_summary_text.done",
+		"response.reasoning_summary_part.done",
+		"response.output_item.done",  // reasoning completed
+		"response.output_item.added", // text 1
+		"response.content_part.added",
+		"response.output_text.delta",
+		"response.output_text.done",
+		"response.content_part.done",
+		"response.output_item.done",  // text 1 completed
+		"response.output_item.added", // custom tool
+		"response.custom_tool_call_input.delta",
+		"response.custom_tool_call_input.done",
+		"response.output_item.done",  // custom tool completed
+		"response.output_item.added", // text 2
+		"response.content_part.added",
+		"response.output_text.delta",
+		"response.output_text.done",
+		"response.content_part.done",
+		"response.output_item.done", // text 2 completed
+		"response.completed",
+	}
+	if !reflect.DeepEqual(events, wantOrder) {
+		t.Fatalf("events = %#v\nwant %#v", events, wantOrder)
+	}
+	if responseCreated == nil || !strings.HasPrefix(responseCreated.Response.ID, "resp_") {
+		t.Fatalf("response.created = %+v, want resp_* id", responseCreated)
+	}
+	if responseInProgress == nil || responseInProgress.Response.ID != responseCreated.Response.ID {
+		t.Fatalf("response.in_progress = %+v, want same response id as created %+v", responseInProgress, responseCreated)
+	}
+
+	// Verify response.Output in completed event has all four items in correct order.
+	if completed == nil {
+		t.Fatal("missing response.completed")
+	}
+	resp := completed.Response
+	if len(resp.Output) != 4 {
+		t.Fatalf("Output len=%d, want 4: %+v", len(resp.Output), resp.Output)
+	}
+	if resp.ID != responseCreated.Response.ID {
+		t.Fatalf("completed response id = %q, want %q", resp.ID, responseCreated.Response.ID)
+	}
+	if want := []string{"reasoning", "message", "custom_tool_call", "message"}; !reflect.DeepEqual(
+		[]string{resp.Output[0].Type, resp.Output[1].Type, resp.Output[2].Type, resp.Output[3].Type},
+		want,
+	) {
+		t.Fatalf("Output types = %v, want %v",
+			[]string{resp.Output[0].Type, resp.Output[1].Type, resp.Output[2].Type, resp.Output[3].Type}, want)
+	}
+	if resp.Output[0].Status != "completed" || resp.Output[1].Status != "completed" ||
+		resp.Output[2].Status != "completed" || resp.Output[3].Status != "completed" {
+		t.Fatalf("all Output items should be completed: %+v", resp.Output)
+	}
+	wantPrefixes := []string{"rs_", "msg_", "fc_", "msg_"}
+	seen := make(map[string]bool)
+	for i, item := range resp.Output {
+		if !strings.HasPrefix(item.ID, wantPrefixes[i]) {
+			t.Fatalf("output[%d].ID = %q, want prefix %q", i, item.ID, wantPrefixes[i])
+		}
+		if seen[item.ID] {
+			t.Fatalf("duplicate output item id %q in %+v", item.ID, resp.Output)
+		}
+		seen[item.ID] = true
+	}
+	if resp.Output[2].ID != customToolID {
+		t.Fatalf("custom tool item id = %q, want event item_id %q", resp.Output[2].ID, customToolID)
+	}
+	if resp.Output[2].CallID != "call_patch" {
+		t.Fatalf("custom tool call_id = %q, want call_patch", resp.Output[2].CallID)
+	}
+	if resp.Output[2].ID == resp.Output[2].CallID {
+		t.Fatalf("custom tool item id should differ from call_id: %+v", resp.Output[2])
+	}
+	if resp.Output[1].Content == nil || len(resp.Output[1].Content) == 0 || resp.Output[1].Content[0].Text != "Let me read the file." {
+		t.Fatalf("text 1 content = %+v", resp.Output[1].Content)
+	}
+	if resp.Output[3].Content == nil || len(resp.Output[3].Content) == 0 || resp.Output[3].Content[0].Text != "The change looks correct." {
+		t.Fatalf("text 2 content = %+v", resp.Output[3].Content)
 	}
 }

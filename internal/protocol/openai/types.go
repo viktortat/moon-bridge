@@ -116,10 +116,10 @@ type ContentPart struct {
 
 // Usage represents token usage statistics.
 type Usage struct {
-	InputTokens        int                `json:"input_tokens,omitempty"`
-	OutputTokens       int                `json:"output_tokens,omitempty"`
-	TotalTokens        int                `json:"total_tokens"`
-	InputTokensDetails InputTokensDetails `json:"input_tokens_details,omitempty"`
+	InputTokens         int                 `json:"input_tokens,omitempty"`
+	OutputTokens        int                 `json:"output_tokens,omitempty"`
+	TotalTokens         int                 `json:"total_tokens"`
+	InputTokensDetails  InputTokensDetails  `json:"input_tokens_details,omitempty"`
 	OutputTokensDetails OutputTokensDetails `json:"output_tokens_details,omitempty"`
 }
 
@@ -240,6 +240,16 @@ type CustomToolCallInputDeltaEvent struct {
 	Delta          string `json:"delta"`
 }
 
+// CustomToolCallInputDoneEvent is emitted when custom tool call input is complete.
+type CustomToolCallInputDoneEvent struct {
+	Type           string `json:"type"`
+	SequenceNumber int64  `json:"sequence_number"`
+	ItemID         string `json:"item_id,omitempty"`
+	CallID         string `json:"call_id,omitempty"`
+	OutputIndex    int    `json:"output_index"`
+	Input          string `json:"input"`
+}
+
 // ReasoningItemSummary provides a summary of reasoning content.
 type ReasoningItemSummary struct {
 	// Signature is the provider-specific reasoning signature (e.g. DeepSeek thinking signature)
@@ -255,11 +265,12 @@ type ReasoningItemSummary struct {
 
 // ReasoningSummaryPartAddedEvent is emitted when a reasoning summary part is added.
 type ReasoningSummaryPartAddedEvent struct {
-	Type           string `json:"type"`
-	SequenceNumber int64  `json:"sequence_number"`
-	ItemID         string `json:"item_id"`
-	OutputIndex    int    `json:"output_index"`
-	SummaryIndex   int    `json:"summary_index"`
+	Type           string               `json:"type"`
+	SequenceNumber int64                `json:"sequence_number"`
+	ItemID         string               `json:"item_id"`
+	OutputIndex    int                  `json:"output_index"`
+	SummaryIndex   int                  `json:"summary_index"`
+	Part           ReasoningItemSummary `json:"part"`
 }
 
 // ReasoningSummaryTextDeltaEvent is emitted for reasoning text deltas.
@@ -272,11 +283,22 @@ type ReasoningSummaryTextDeltaEvent struct {
 	Delta          string `json:"delta"`
 }
 
-// ReasoningSummaryPartDoneEvent is emitted when a reasoning summary part is complete.
-type ReasoningSummaryPartDoneEvent struct {
+// ReasoningSummaryTextDoneEvent is emitted when reasoning summary text is complete.
+type ReasoningSummaryTextDoneEvent struct {
 	Type           string `json:"type"`
 	SequenceNumber int64  `json:"sequence_number"`
 	ItemID         string `json:"item_id"`
 	OutputIndex    int    `json:"output_index"`
 	SummaryIndex   int    `json:"summary_index"`
+	Text           string `json:"text"`
+}
+
+// ReasoningSummaryPartDoneEvent is emitted when a reasoning summary part is complete.
+type ReasoningSummaryPartDoneEvent struct {
+	Type           string               `json:"type"`
+	SequenceNumber int64                `json:"sequence_number"`
+	ItemID         string               `json:"item_id"`
+	OutputIndex    int                  `json:"output_index"`
+	SummaryIndex   int                  `json:"summary_index"`
+	Part           ReasoningItemSummary `json:"part"`
 }
