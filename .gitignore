@@ -56,3 +56,4 @@ build/
 .dev.vars
 /moonbridge
 logs/
+moonbridge.log
