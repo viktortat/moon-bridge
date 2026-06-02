@@ -140,8 +140,18 @@ type ProviderManager struct {
 	providers      map[string]ProviderConfig       // provider key -> config (for inspection)
 	routes         map[string]ModelRoute           // model alias -> route
 	defaultK       string                          // default provider key
+	defaultModel   string                          // default model alias (defaults.model) for unknown-model fallback
 	resolvedWS     map[string]string               // provider key -> resolved web search support
 	modelProviders map[string][]modelProviderEntry // upstream model name -> (provider key, priority) (reverse index)
+}
+
+// SetDefaultModel sets the default model alias used as a fallback when a
+// requested model matches no route, direct ref, or catalog entry. Empty
+// disables the fallback (resolution then errors on unknown models).
+func (pm *ProviderManager) SetDefaultModel(alias string) {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	pm.defaultModel = alias
 }
 
 // NewProviderManager creates a ProviderManager from provider configs and model routes.
@@ -267,6 +277,7 @@ func (pm *ProviderManager) Reload(cfg config.ProviderConfig) error {
 	pm.providers = newPM.providers
 	pm.routes = newPM.routes
 	pm.defaultK = newPM.defaultK
+	pm.defaultModel = cfg.DefaultProvider
 	pm.resolvedWS = newPM.resolvedWS
 	pm.modelProviders = newPM.modelProviders
 	return nil
@@ -379,7 +390,16 @@ func (pm *ProviderManager) ResolveModel(modelName string) (*ResolvedRoute, error
 		return &ResolvedRoute{Candidates: candidates}, nil
 	}
 
-	// 4. No match
+	// 4. Default-model fallback: route any unrecognized model to the
+	// configured default model (defaults.model). This lets a single-model
+	// bridge serve clients (e.g. Codex) that request arbitrary model names.
+	if pm.defaultModel != "" && pm.defaultModel != modelName {
+		if resolved, err := pm.ResolveModel(pm.defaultModel); err == nil {
+			return resolved, nil
+		}
+	}
+
+	// 5. No match
 	return nil, fmt.Errorf("no route or provider found for model %q", modelName)
 }
 

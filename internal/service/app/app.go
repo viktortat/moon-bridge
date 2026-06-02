@@ -80,6 +80,7 @@ func runTransform(ctx context.Context, cfg config.Config, errors io.Writer) erro
 	if err != nil {
 		return fmt.Errorf("init provider manager: %w", err)
 	}
+	providerMgr.SetDefaultModel(providerCfg.DefaultProvider)
 
 	// Resolve a fallback client for web search probing and server fallback.
 	defaultClient := resolveDefaultClient(providerMgr, errors)
@@ -166,6 +167,7 @@ func runTransform(ctx context.Context, cfg config.Config, errors io.Writer) erro
 				if err != nil {
 					return fmt.Errorf("rebuild provider manager from DB: %w", err)
 				}
+				providerMgr.SetDefaultModel(dbProviderCfg.DefaultProvider)
 				_ = resolveDefaultClient(providerMgr, errors)
 				resolvePerProviderWebSearch(ctx, cfg, providerMgr, errors)
 

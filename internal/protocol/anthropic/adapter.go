@@ -310,9 +310,17 @@ func (a *AnthropicProviderAdapter) FromCoreRequest(ctx context.Context, req *for
 	if len(req.Tools) > 0 {
 		anthropicReq.Tools = make([]Tool, 0, len(req.Tools))
 		for _, t := range req.Tools {
+			// Strict providers (e.g. MiniMax) reject the whole request if any
+			// tool has an empty name or parameters ("invalid params, function
+			// name or parameters is empty"). OpenAI built-in tool types like
+			// image_generation arrive here with no name and cannot be expressed
+			// as a named tool, so skip them.
+			if t.Name == "" {
+				continue
+			}
 			schema := cleanSchema(t.InputSchema)
-			if schema == nil {
-				schema = map[string]any{"type": "object"}
+			if len(schema) == 0 {
+				schema = map[string]any{"type": "object", "properties": map[string]any{}}
 			}
 			anthropicReq.Tools = append(anthropicReq.Tools, Tool{
 				Name:        t.Name,

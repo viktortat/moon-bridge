@@ -1,0 +1,28 @@
+mode: "Transform"
+
+server:
+  addr: "127.0.0.1:38440"
+
+models:
+  MiniMax-M3:
+    context_window: 1000000
+    max_output_tokens: 65536
+    input_modalities:
+      - "text"
+      - "image"
+
+providers:
+  minimax:
+    base_url: "https://api.minimax.io/anthropic"
+    api_key: "${MINIMAX_API_KEY}"
+    offers:
+      - model: MiniMax-M3
+
+routes:
+  MiniMax-M3:
+    model: MiniMax-M3
+    provider: minimax
+
+defaults:
+  model: MiniMax-M3
+  max_tokens: 65536

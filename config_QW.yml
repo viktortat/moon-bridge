@@ -1,0 +1,30 @@
+mode: "Transform"
+
+server:
+  addr: "127.0.0.1:38440"
+
+models:
+  "qwen/qwen3.7-max":
+    context_window: 131072
+    max_output_tokens: 32768
+    input_modalities:
+      - "text"
+      - "image"
+
+providers:
+  openrouter:
+    base_url: "https://openrouter.ai/api"
+    api_key: "${OPENROUTER_API_KEY}"
+    protocol: "anthropic"
+    version: "2023-06-01"
+    offers:
+      - model: "qwen/qwen3.7-max"
+
+routes:
+  qwen3-max:
+    model: "qwen/qwen3.7-max"
+    provider: openrouter
+
+defaults:
+  model: qwen3-max
+  max_tokens: 32768

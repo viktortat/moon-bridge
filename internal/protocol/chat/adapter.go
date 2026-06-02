@@ -118,12 +118,26 @@ func (a *ChatProviderAdapter) FromCoreRequest(ctx context.Context, req *format.C
 	if len(req.Tools) > 0 {
 		chatReq.Tools = make([]ChatTool, 0, len(req.Tools))
 		for _, t := range req.Tools {
+			// Chat-completions providers (e.g. MiniMax) reject the whole
+			// request if any tool has an empty function name or empty
+			// parameters ("invalid params, function name or parameters is
+			// empty"). OpenAI built-in tool types like image_generation arrive
+			// here with no name and cannot be expressed as a chat function, so
+			// skip them. web_search arrives with a name but no schema, so give
+			// it a valid empty object schema instead of nil.
+			if t.Name == "" {
+				continue
+			}
+			params := t.InputSchema
+			if len(params) == 0 {
+				params = map[string]any{"type": "object", "properties": map[string]any{}}
+			}
 			chatReq.Tools = append(chatReq.Tools, ChatTool{
 				Type: "function",
 				Function: FunctionDef{
 					Name:        t.Name,
 					Description: t.Description,
-					Parameters:  t.InputSchema,
+					Parameters:  params,
 				},
 			})
 		}
@@ -250,6 +264,7 @@ func (a *ChatProviderAdapter) ToCoreStream(ctx context.Context, src any) (<-chan
 			callStarted      map[int]bool // tracks which tool call indices have been started
 			toolCallSlot     map[int]int  // tool_call delta index -> content block index
 			reasoningContent string       // accumulated reasoning content for the current reasoning block
+			finished         bool         // true after first finish_reason — prevents duplicate CoreContentBlockDone
 		}
 		choices := make(map[int]*choiceState)
 		var seqNum int64
@@ -454,7 +469,10 @@ func (a *ChatProviderAdapter) ToCoreStream(ctx context.Context, src any) (<-chan
 					}
 
 					// Emit content_block.done when finish_reason is set.
-					if sc.FinishReason != "" {
+					// Guard against duplicate finish_reason chunks (e.g. OpenRouter MiniMax sends
+					// two chunks with finish_reason="stop": one without usage, one with usage).
+					if sc.FinishReason != "" && !state.finished {
+						state.finished = true
 						stopReason := a.mapFinishReason(sc.FinishReason)
 						if state.hasReasoning {
 							emit(format.CoreStreamEvent{

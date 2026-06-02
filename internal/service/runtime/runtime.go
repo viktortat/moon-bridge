@@ -74,6 +74,7 @@ func (rt *Runtime) Reload(cfg config.Config) error {
 	if err != nil {
 		return fmt.Errorf("runtime reload: provider manager: %w", err)
 	}
+	providerMgr.SetDefaultModel(providerCfg.DefaultProvider)
 
 	// Compute pricing from the new config.
 	pricing := provider.BuildPricingFromConfig(providerCfg)

@@ -4,27 +4,6 @@ server:
   addr: "127.0.0.1:38440"
 
 models:
-  minimax-m3:
-    context_window: 1000000
-    max_output_tokens: 65536
-    input_modalities:
-      - "text"
-      - "image"
-
-  deepseek-v4-pro:
-    context_window: 1000000
-    max_output_tokens: 384000
-    default_reasoning_level: "high"
-    supported_reasoning_levels:
-      - effort: "high"
-        description: "High reasoning effort"
-      - effort: "xhigh"
-        description: "Extra high reasoning effort"
-    supports_reasoning_summaries: true
-    default_reasoning_summary: "auto"
-    extensions:
-      deepseek_v4:
-        enabled: true
   deepseek-v4-flash:
     context_window: 1000000
     max_output_tokens: 384000
@@ -41,18 +20,10 @@ models:
         enabled: true
 
 providers:
-  minimax:
-    base_url: "https://api.minimax.io/anthropic"
-    api_key: "sk-api-x2wogw7Cmx2ZA79sWBFICp4SKHRBdzmhGn0OK8ZPPDIHYtX1cHxyIqxbo9baQ_q-PwxbsTHGQNV9m0Ku6-k9FgqTX5TKld036mdN7hCxlGGArQf8tdywuyY"
-    protocol: "anthropic"
-    offers:
-      - model: minimax-m3
-
   deepseek:
     base_url: "https://api.deepseek.com/anthropic"
-    api_key: "sk-039854f2a2134911a8f2a7beeeb2cbd4"
+    api_key: "${DEEPSEEK_API_KEY}"
     offers:
-      - model: deepseek-v4-pro
       - model: deepseek-v4-flash
 
 routes:
